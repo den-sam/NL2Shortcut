@@ -158,7 +158,7 @@ python main.py
 ## 📬 联系方式
 
 - GitHub Issues：https://github.com/den-sam/NL2Shortcut/issues
-- 知乎：qazplm(https://www.zhihu.com/people/qazplm)
+- 知乎：itvtr3(https://www.zhihu.com/people/itvtr3)
 - Email：Deng2312025@outlook.com
 
 ---
