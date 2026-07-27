@@ -2,9 +2,9 @@
 
 > 一个 0 截屏的桌面自动化工具——用自然语言或热键指挥电脑，绝不偷看你的屏幕。
 
-[![GitHub stars](https://img.shields.io/github/stars/你的用户名/NL2Shortcut?style=social)](https://github.com/你的用户名/NL2Shortcut/stargazers)
-[![GitHub license](https://img.shields.io/github/license/你的用户名/NL2Shortcut)](https://github.com/你的用户名/NL2Shortcut/blob/main/LICENSE)
-[![爱发电](https://img.shields.io/badge/赞助-爱发电-orange)](https://afdian.com/a/你的爱发电ID)
+[![GitHub stars](https://img.shields.io/github/stars/den-sam/NL2Shortcut?style=social)](https://github.com/den-sam/NL2Shortcut/stargazers)
+[![GitHub license](https://img.shields.io/github/license/den-sam/NL2Shortcut)](https://github.com/den-sam/NL2Shortcut/blob/main/LICENSE)
+[![爱发电](https://img.shields.io/badge/赞助-爱发电-orange)](https://afdian.com/a/weaefaw)
 
 ---
 
@@ -34,7 +34,7 @@ NL2Shortcut 使用 Windows 官方推荐的 `SendInput` API 模拟键盘鼠标事
 
 ### 下载
 
-从 [Releases](https://github.com/你的用户名/NL2Shortcut/releases) 下载最新版 EXE 文件。
+从 [Releases](https://github.com/den-sam/NL2Shortcut/releases) 下载最新版 EXE 文件。
 
 ### 使用
 
