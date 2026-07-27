@@ -112,7 +112,7 @@ Windows 提供了多种模拟输入的方式：
 ### 开发环境
 bash
 
-git clone https://github.com/你的用户名/NL2Shortcut.git
+git clone https://github.com/den-sam/NL2Shortcut.git
 
 cd NL2Shortcut
 
@@ -142,8 +142,8 @@ python main.py
 - C++ 执行层外包协作
 - 知乎推广（让更多人知道这个项目）
 
-[![爱发电](https://img.shields.io/badge/赞助-爱发电-orange)](https://afdian.com/a/你的爱发电ID)
-[![GitHub Sponsors](https://img.shields.io/badge/赞助-GitHub%20Sponsors-blue)](https://github.com/sponsors/你的GitHub用户名)
+[![爱发电](https://img.shields.io/badge/赞助-爱发电-orange)](https://afdian.com/a/weaefaw)
+[![GitHub Sponsors](https://img.shields.io/badge/赞助-GitHub%20Sponsors-blue)](https://github.com/sponsors/den-sam)
 
 ---
 
@@ -157,9 +157,9 @@ python main.py
 
 ## 📬 联系方式
 
-- GitHub Issues：https://github.com/你的用户名/NL2Shortcut/issues
-- 知乎：[@你的知乎ID](https://www.zhihu.com/people/你的知乎ID)
-- Email：你的邮箱@example.com（可选）
+- GitHub Issues：https://github.com/den-sam/NL2Shortcut/issues
+- 知乎：小看山iTVTr3(https://www.zhihu.com/people/小看山iTVTr3)
+- Email：Deng2312025@outlook.com
 
 ---
 
