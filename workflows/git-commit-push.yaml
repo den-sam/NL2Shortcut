@@ -1,0 +1,14 @@
+name: "Git 提交并推送"
+description: "暂存所有更改 → 提交 → 推送到远程仓库"
+variables:
+  message: "auto update"
+steps:
+  - name: 暂存所有更改
+    action: shell
+    command: git add .
+  - name: 提交
+    action: shell
+    command: git commit -m "$message"
+  - name: 推送
+    action: shell
+    command: git push

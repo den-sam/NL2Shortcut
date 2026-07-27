@@ -1,0 +1,10 @@
+# Auto-saved from execution: 打开任务管理器
+# Status: success, Mode: 
+name: 打开任务管理器-ok
+description: '[OK] 打开任务管理器'
+version: '1.0'
+variables: {}
+steps:
+- name: 打开任务管理器
+  action: shortcut
+  command: Ctrl+Shift+Esc

@@ -1,0 +1,262 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NL2Shortcut 示例私包 #1：下载文件夹整理
+#
+# 将杂乱的下载文件夹按文件类型自动归类到子文件夹，
+# 生成整理报告，最后打开整理后的文件夹展示结果。
+#
+# 安全：只移动不删除，所有文件归入 _分类_* 子目录，可随时还原。
+# ═══════════════════════════════════════════════════════════════════════
+name: "下载文件夹整理"
+description: "按类型自动归类下载文件夹中的文件，生成报告并打开结果目录"
+version: "1.0"
+variables:
+  downloads_path: "%USERPROFILE%\\Downloads"
+
+steps:
+  # ── 阶段 1：创建分类子文件夹 ──
+  - name: "创建分类文件夹"
+    action: shell
+    timeout: 15
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $cats = @(
+        '$dl\_分类_文档',
+        '$dl\_分类_图片',
+        '$dl\_分类_压缩包',
+        '$dl\_分类_安装包',
+        '$dl\_分类_视频音频',
+        '$dl\_分类_代码脚本',
+        '$dl\_分类_表格PDF',
+        '$dl\_分类_大文件(>100MB)',
+        '$dl\_分类_临时文件',
+        '$dl\_分类_其他'
+      )
+      foreach ($d in $cats) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+      }
+      Write-Output '分类文件夹已就绪'
+      "
+
+  # ── 阶段 2：按扩展名归类 ──
+  - name: "归类文档 (docx/pdf/txt/md 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.docx','*.doc','*.pdf','*.txt','*.md','*.rtf','*.odt','*.wps','*.tex','*.log','*.epub','*.mobi')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_文档\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"文档: $count 个\"
+      "
+
+  - name: "归类图片 (png/jpg/gif/webp 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.png','*.jpg','*.jpeg','*.gif','*.bmp','*.webp','*.svg','*.ico','*.tiff','*.tif','*.heic','*.psd','*.raw')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_图片\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"图片: $count 个\"
+      "
+
+  - name: "归类压缩包 (zip/rar/7z/tar 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.zip','*.rar','*.7z','*.tar','*.gz','*.bz2','*.xz','*.iso','*.cab','*.msi','*.tgz')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_压缩包\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"压缩包: $count 个\"
+      "
+
+  - name: "归类安装包 (exe/msi/appx 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.exe','*.msi','*.appx','*.dmg','*.pkg','*.deb','*.rpm')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_安装包\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"安装包: $count 个\"
+      "
+
+  - name: "归类视频音频 (mp4/mkv/mp3/flac 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.mp4','*.avi','*.mkv','*.mov','*.wmv','*.flv','*.webm','*.m4v','*.mp3','*.wav','*.flac','*.aac','*.ogg','*.wma','*.m4a')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_视频音频\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"视频音频: $count 个\"
+      "
+
+  - name: "归类代码脚本 (py/js/ts/sh/ps1 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.py','*.js','*.ts','*.html','*.css','*.java','*.cpp','*.c','*.h','*.rs','*.go','*.rb','*.php','*.swift','*.sql','*.sh','*.bat','*.ps1','*.json','*.xml','*.yaml','*.yml','*.toml','*.env','*.cfg','*.ini')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_代码脚本\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"代码: $count 个\"
+      "
+
+  - name: "归类表格和PDF (xlsx/xls/csv/pdf 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.xlsx','*.xls','*.csv','*.tsv','*.ods','*.xlsm','*.xlsb','*.numbers')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_表格PDF\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"表格: $count 个\"
+      "
+
+  # ── 阶段 3：特殊处理 ──
+  - name: "归拢大文件 (>100MB)"
+    action: shell
+    timeout: 60
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $count = 0
+      Get-ChildItem -Path $dl -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Length -gt 100MB -and $_.DirectoryName -eq $dl
+      } | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination '$dl\_分类_大文件(>100MB)\' -Force -ErrorAction SilentlyContinue
+        $count++
+      }
+      Write-Output \"大文件: $count 个\"
+      "
+
+  - name: "归拢临时文件 (tmp/bak/cache 等)"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $exts = @('*.tmp','*.temp','*.bak','*.backup','*.old','*.cache','*.dmp','*.crdownload','*.partial')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $dl -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          if ($_.DirectoryName -eq $dl) { Move-Item -Path $_.FullName -Destination '$dl\_分类_临时文件\' -Force -ErrorAction SilentlyContinue; $count++ }
+        }
+      }
+      Write-Output \"临时文件: $count 个\"
+      "
+
+  # ── 阶段 4：剩余文件归入 "其他" ──
+  - name: "归类剩余文件到其他"
+    action: shell
+    timeout: 30
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $count = 0
+      Get-ChildItem -Path $dl -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.DirectoryName -eq $dl
+      } | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination '$dl\_分类_其他\' -Force -ErrorAction SilentlyContinue
+        $count++
+      }
+      Write-Output \"剩余: $count 个\"
+      "
+
+  # ── 阶段 5：清理 + 报告 ──
+  - name: "清理空分类文件夹"
+    action: shell
+    timeout: 15
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      Get-ChildItem -Path '$dl\_分类_*' -Directory -ErrorAction SilentlyContinue | Where-Object {
+        (Get-ChildItem -Path $_.FullName -File -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0
+      } | Remove-Item -Force -ErrorAction SilentlyContinue
+      Write-Output '空文件夹已清理'
+      "
+
+  - name: "生成整理报告到桌面"
+    action: shell
+    timeout: 15
+    command: |
+      powershell -NoProfile -Command "
+      $dl = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $report = Join-Path $desktop '下载文件夹整理报告.txt'
+      $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+      @'
+      ╔══════════════════════════════════╗
+      ║  NL2Shortcut 下载文件夹整理报告 ║
+      ╚══════════════════════════════════╝
+
+      执行时间: {0}
+      下载路径: {1}
+
+      ── 分类统计 ──
+      '@ -f $now, $dl | Out-File -FilePath $report -Encoding UTF8
+
+      $cats = Get-ChildItem -Path '$dl\_分类_*' -Directory -ErrorAction SilentlyContinue | Sort-Object Name
+      $total = 0
+      foreach ($cat in $cats) {
+        $cnt = (Get-ChildItem -Path $cat.FullName -File -ErrorAction SilentlyContinue | Measure-Object).Count
+        $sz = (Get-ChildItem -Path $cat.FullName -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $szMB = if ($sz) { [math]::Round($sz/1MB, 1) } else { 0 }
+        $total += $cnt
+        '  {0}: {1} 个 ({2} MB)' -f $cat.Name, $cnt, $szMB | Out-File -FilePath $report -Encoding UTF8 -Append
+      }
+      @'
+
+      ────────────────────────
+      总计: {0} 个文件已分类
+      '@ -f $total | Out-File -FilePath $report -Encoding UTF8 -Append
+
+      Write-Output \"报告已生成: 共 $total 个文件\"
+      "
+
+  # ── 阶段 6：快捷键展示结果 ──
+  - name: "等待文件系统同步"
+    action: wait
+    command: 500ms
+
+  - name: "Win+E 打开下载文件夹展示结果"
+    action: shortcut
+    command: Win+E

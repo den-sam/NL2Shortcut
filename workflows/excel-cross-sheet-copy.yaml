@@ -1,0 +1,106 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NL2Shortcut 示例私包 #3：Excel 跨表搬运
+#
+# 将当前工作表的数据区域复制到目标工作表。
+# 全程使用 Excel 原生快捷键，无需 COM 对象，兼容所有 Excel 版本。
+#
+# 使用步骤：
+#   1. 在 Excel 中打开工作簿，切换到源工作表
+#   2. 点击数据区域内的任意单元格（确保数据区域连续）
+#   3. 执行此工作流（Ctrl+Alt+S → 选择此工作流 → Execute）
+#
+# 快捷键链：Ctrl+A(选中区域) → Ctrl+C(复制) → Ctrl+PageDown(下一表)
+#          → Ctrl+Home(A1) → Ctrl+V(粘贴) → Ctrl+S(保存)
+# ═══════════════════════════════════════════════════════════════════════
+name: "Excel 跨表搬运"
+description: "快捷键将当前 Excel 工作表数据复制到下一张工作表并保存"
+version: "1.0"
+variables:
+  # "next" = 下一张表(Ctrl+PageDown)，"prev" = 上一张表(Ctrl+PageUp)
+  target_direction: "next"
+  # 粘贴起点（默认 A1）
+  paste_cell: "A1"
+
+steps:
+  # ── 步骤 1：激活 Excel 窗口 ──
+  # 提示用户先手动 Alt+Tab 切换到 Excel，或工作流发送 Alt+Tab
+  - name: "Alt+Tab 切换到 Excel (若尚未激活)"
+    action: shortcut
+    command: Alt+Tab
+
+  - name: "等待窗口切换"
+    action: wait
+    command: 300ms
+
+  # ── 步骤 2：选中当前数据区域 ──
+  # 第一次 Ctrl+A：选中当前数据区域（Current Region）
+  # 第二次 Ctrl+A：选中整张工作表（仅当需要全表复制时才按两次）
+  - name: "Ctrl+A 选中当前数据区域"
+    action: shortcut
+    command: Ctrl+A
+
+  - name: "等待选中完成"
+    action: wait
+    command: 150ms
+
+  # ── 步骤 3：复制 ──
+  - name: "Ctrl+C 复制选中数据"
+    action: shortcut
+    command: Ctrl+C
+
+  - name: "等待复制完成"
+    action: wait
+    command: 150ms
+
+  # ── 步骤 4：切换到目标工作表 ──
+  - name: "Ctrl+PageDown 切换到下一张工作表"
+    action: shortcut
+    command: Ctrl+PageDown
+    condition: "ctx.get('target_direction', 'next') == 'next'"
+
+  - name: "Ctrl+PageUp 切换到上一张工作表"
+    action: shortcut
+    command: Ctrl+PageUp
+    condition: "ctx.get('target_direction', 'next') == 'prev'"
+
+  - name: "等待工作表切换"
+    action: wait
+    command: 200ms
+
+  # ── 步骤 5：定位到目标单元格 ──
+  - name: "Ctrl+Home 跳转到 A1"
+    action: shortcut
+    command: Ctrl+Home
+
+  - name: "等待定位完成"
+    action: wait
+    command: 100ms
+
+  # ── 步骤 6：粘贴 ──
+  - name: "Ctrl+V 粘贴数据"
+    action: shortcut
+    command: Ctrl+V
+
+  - name: "等待粘贴完成"
+    action: wait
+    command: 200ms
+
+  # ── 步骤 7：保存 ──
+  - name: "Ctrl+S 保存工作簿"
+    action: shortcut
+    command: Ctrl+S
+
+  - name: "等待保存完成"
+    action: wait
+    command: 300ms
+
+  # ── 步骤 8：返回源工作表 ──
+  - name: "Ctrl+PageUp 返回源工作表"
+    action: shortcut
+    command: Ctrl+PageUp
+    condition: "ctx.get('target_direction', 'next') == 'next'"
+
+  - name: "Ctrl+PageDown 返回源工作表"
+    action: shortcut
+    command: Ctrl+PageDown
+    condition: "ctx.get('target_direction', 'next') == 'prev'"

@@ -1,0 +1,185 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NL2Shortcut 示例私包 #5：浏览器表单填充
+#
+# 模拟 Tab 键在表单字段间切换并逐字段输入预设值。
+# 适用于任何网页表单：注册页、登录页、数据录入页等。
+#
+# 使用步骤：
+#   1. 在浏览器中打开目标表单页面
+#   2. 点击第一个表单字段（确保光标在该字段中）
+#   3. 编辑下方 field_1 ~ field_10 变量为你的数据（留空则跳过）
+#   4. 执行此工作流
+#
+# 适用场景：
+#   - 重复填写相同格式的表单（测试账号注册、数据录入等）
+#   - 配合 Excel 批量生成变量值文件后导入
+# ═══════════════════════════════════════════════════════════════════════
+name: "浏览器表单填充"
+description: "Tab + 逐字段输入，快速填充网页表单（最多10个字段）"
+version: "1.0"
+variables:
+  # ── 表单字段值（留空字符串表示该字段不存在）──
+  field_1: "张三"
+  field_2: "zhangsan@example.com"
+  field_3: "13800138000"
+  field_4: "北京市朝阳区建国路88号"
+  field_5: "软件工程师"
+  field_6: ""
+  field_7: ""
+  field_8: ""
+  field_9: ""
+  field_10: ""
+  # 是否在最后一个非空字段后按 Enter 提交表单（"true"/"false"）
+  submit: "true"
+
+steps:
+  # ── 字段 1（当前光标位置）──
+  - name: "输入字段1 — 姓名"
+    action: type
+    command: "$field_1"
+    condition: "ctx.get('field_1','').strip() != ''"
+
+  - name: "等待输入完成"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_1','').strip() != ''"
+
+  # ── 字段 2 ──
+  - name: "Tab → 字段2 — 邮箱"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_2','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_2','').strip() != ''"
+  - name: "输入字段2 — 邮箱"
+    action: type
+    command: "$field_2"
+    condition: "ctx.get('field_2','').strip() != ''"
+
+  # ── 字段 3 ──
+  - name: "Tab → 字段3 — 手机号"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_3','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_3','').strip() != ''"
+  - name: "输入字段3 — 手机号"
+    action: type
+    command: "$field_3"
+    condition: "ctx.get('field_3','').strip() != ''"
+
+  # ── 字段 4 ──
+  - name: "Tab → 字段4 — 地址"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_4','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_4','').strip() != ''"
+  - name: "输入字段4 — 地址"
+    action: type
+    command: "$field_4"
+    condition: "ctx.get('field_4','').strip() != ''"
+
+  # ── 字段 5 ──
+  - name: "Tab → 字段5 — 职业"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_5','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_5','').strip() != ''"
+  - name: "输入字段5 — 职业"
+    action: type
+    command: "$field_5"
+    condition: "ctx.get('field_5','').strip() != ''"
+
+  # ── 字段 6 ──
+  - name: "Tab → 字段6"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_6','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_6','').strip() != ''"
+  - name: "输入字段6"
+    action: type
+    command: "$field_6"
+    condition: "ctx.get('field_6','').strip() != ''"
+
+  # ── 字段 7 ──
+  - name: "Tab → 字段7"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_7','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_7','').strip() != ''"
+  - name: "输入字段7"
+    action: type
+    command: "$field_7"
+    condition: "ctx.get('field_7','').strip() != ''"
+
+  # ── 字段 8 ──
+  - name: "Tab → 字段8"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_8','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_8','').strip() != ''"
+  - name: "输入字段8"
+    action: type
+    command: "$field_8"
+    condition: "ctx.get('field_8','').strip() != ''"
+
+  # ── 字段 9 ──
+  - name: "Tab → 字段9"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_9','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_9','').strip() != ''"
+  - name: "输入字段9"
+    action: type
+    command: "$field_9"
+    condition: "ctx.get('field_9','').strip() != ''"
+
+  # ── 字段 10 ──
+  - name: "Tab → 字段10"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('field_10','').strip() != ''"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('field_10','').strip() != ''"
+  - name: "输入字段10"
+    action: type
+    command: "$field_10"
+    condition: "ctx.get('field_10','').strip() != ''"
+
+  # ── 提交（可选）──
+  - name: "Tab 跳到提交按钮"
+    action: shortcut
+    command: Tab
+    condition: "ctx.get('submit','true').lower() == 'true'"
+  - name: "等待Tab"
+    action: wait
+    command: 200ms
+    condition: "ctx.get('submit','true').lower() == 'true'"
+  - name: "Enter 提交表单"
+    action: shortcut
+    command: Enter
+    condition: "ctx.get('submit','true').lower() == 'true'"

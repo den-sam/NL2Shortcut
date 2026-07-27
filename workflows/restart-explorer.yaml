@@ -1,0 +1,12 @@
+name: "重启资源管理器"
+description: "结束并重新启动 Windows 资源管理器进程"
+steps:
+  - name: 结束 Explorer
+    action: shell
+    command: taskkill /f /im explorer.exe
+  - name: 等待进程结束
+    action: wait
+    command: "2"
+  - name: 重新启动 Explorer
+    action: shell
+    command: start explorer.exe

@@ -1,0 +1,31 @@
+# Auto-saved from execution: 找到 report 并复制
+# Status: success, Mode: composite
+name: 找到-report-并复制-ok
+description: '[OK] 找到 report 并复制 (dry-run)'
+version: '1.0'
+variables: {}
+steps:
+- name: Win+E 打开 / 聚焦资源管理器
+  action: shortcut
+  command: Win+E
+- name: Ctrl+E 聚焦搜索框
+  action: shortcut
+  command: Ctrl+E
+- name: 输入搜索关键词「report」
+  action: type
+  command: report
+- name: Enter 执行搜索
+  action: shortcut
+  command: Enter
+- name: 等待搜索索引返回结果
+  action: wait
+  command: 800ms
+- name: Enter 进入结果（按字面按键）
+  action: shortcut
+  command: Enter
+- name: Space 勾选当前聚焦项
+  action: shortcut
+  command: Space
+- name: Ctrl+C 复制选中项到剪贴板
+  action: shortcut
+  command: Ctrl+C

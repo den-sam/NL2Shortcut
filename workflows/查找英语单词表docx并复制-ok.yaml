@@ -1,0 +1,37 @@
+# Auto-saved from execution: 查找"C:\Users\Deng2\Desktop\新建DOCX文档.docx"并复制
+# Status: success, Mode: composite
+name: 查找C:\Users\Deng2\Desktop\英语单词表.docx并复制-ok
+description: '[OK] 查找"C:\Users\Deng2\Desktop\英语单词表.docx"并复制'
+version: '1.0'
+variables: {}
+steps:
+- name: Win+E 打开资源管理器
+  action: shortcut
+  command: Win+E
+- name: 等待资源管理器加载
+  action: wait
+  command: 800ms
+- name: Ctrl+E 聚焦搜索框
+  action: shortcut
+  command: Ctrl+E
+# - name: Ctrl+A 清空搜索框
+#   action: shortcut
+#   command: Ctrl+A
+- name: 输入路径"C:\Users\Deng2\Desktop\英语单词表.docx"
+  action: type
+  command: C:\Users\Deng2\Desktop\英语单词表.docx
+- name: 等待路径完整写入输入框
+  action: wait
+  command: 1500ms
+- name: Enter 触发搜索/跳转
+  action: shortcut
+  command: Enter
+- name: 等待文件夹内容加载
+  action: wait
+  command: 600ms
+- name: Space 选择文件
+  action: shortcut
+  command: Space
+- name: Ctrl+C 复制选中文件
+  action: shortcut
+  command: Ctrl+C

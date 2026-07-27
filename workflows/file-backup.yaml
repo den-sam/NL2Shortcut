@@ -1,0 +1,15 @@
+name: "文件备份"
+description: "将桌面指定文件备份到文档目录的备份文件夹"
+variables:
+  source_file: "important.txt"
+steps:
+  - name: 生成日期
+    action: python
+    command: "datetime.datetime.now().strftime('%Y%m%d')"
+    capture: date
+  - name: 创建备份目录
+    action: shell
+    command: 'mkdir "%USERPROFILE%\\Documents\\Backups\\$date" 2>nul'
+  - name: 复制文件
+    action: shell
+    command: 'copy "%USERPROFILE%\\Desktop\\$source_file" "%USERPROFILE%\\Documents\\Backups\\$date\\"'

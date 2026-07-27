@@ -1,0 +1,144 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NL2Shortcut 示例私包 #2：邮件附件归档
+#
+# 通过 PowerShell COM 调用 Outlook，自动提取收件箱中最新邮件的
+# 附件并保存到归档目录，最后打开归档目录展示结果。
+#
+# 前提条件：
+#   1. 已安装 Microsoft Outlook 桌面版
+#   2. Outlook 正在运行（COM 会自动连接，无需额外操作）
+#   3. 首次运行时 Outlook 可能弹出安全提示，选择"允许"即可
+#
+# 安全：仅读取和保存附件，不会修改或删除任何邮件。
+# ═══════════════════════════════════════════════════════════════════════
+name: "邮件附件归档"
+description: "自动提取 Outlook 收件箱最新邮件的附件并保存到归档目录"
+version: "1.0"
+variables:
+  archive_root: "%USERPROFILE%\\Documents\\邮件附件归档"
+  max_emails: "20"
+  # 要保存的附件扩展名（逗号分隔，留空表示全部）
+  attachment_filter: ".pdf,.docx,.xlsx,.pptx,.jpg,.png,.zip,.txt"
+
+steps:
+  # ── 阶段 1：创建归档目录 + 生成日期标签 ──
+  - name: "生成归档日期标签"
+    action: python
+    command: "datetime.datetime.now().strftime('%Y%m%d_%H%M')"
+    capture: date_label
+
+  - name: "创建归档目录"
+    action: shell
+    timeout: 10
+    command: |
+      powershell -NoProfile -Command "
+      $archive = \"$USERPROFILE\\Documents\\邮件附件归档\\$date_label\"
+      if (-not (Test-Path $archive)) {
+        New-Item -ItemType Directory -Path $archive -Force | Out-Null
+      }
+      Write-Output $archive
+      "
+
+  # ── 阶段 2：通过 COM 获取 Outlook 附件 ──
+  - name: "提取 Outlook 收件箱最新邮件附件"
+    action: shell
+    timeout: 60
+    command: |
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "
+      \$ErrorActionPreference = 'Stop'
+      try {
+        \$outlook = New-Object -ComObject Outlook.Application
+        \$namespace = \$outlook.GetNamespace('MAPI')
+        \$inbox = \$namespace.GetDefaultFolder(6)
+        \$emails = \$inbox.Items | Sort-Object ReceivedTime -Descending | Select-Object -First 20
+        \$archive = Join-Path \$env:USERPROFILE 'Documents\\邮件附件归档\\$date_label'
+        if (-not (Test-Path \$archive)) { New-Item -ItemType Directory -Path \$archive -Force | Out-Null }
+
+        \$saved = 0
+        \$skipped = 0
+        \$filter = '$attachment_filter'.Split(',',[StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { \$_.Trim().ToLower() }
+
+        foreach (\$email in \$emails) {
+          if (\$email.Attachments.Count -gt 0) {
+            foreach (\$att in \$email.Attachments) {
+              \$ext = [System.IO.Path]::GetExtension(\$att.FileName).ToLower()
+              \$match = (\$filter.Count -eq 0) -or (\$filter -contains \$ext)
+              if (\$match) {
+                \$safeName = \$att.FileName
+                \$dest = Join-Path \$archive \$safeName
+                # 处理重名：文件名后追加数字
+                \$counter = 1
+                while (Test-Path \$dest) {
+                  \$base = [System.IO.Path]::GetFileNameWithoutExtension(\$att.FileName)
+                  \$dest = Join-Path \$archive (\"{0}_{1}{2}\" -f \$base, \$counter++, \$ext)
+                }
+                try { \$att.SaveAsFile(\$dest); \$saved++ } catch { \$skipped++ }
+              }
+            }
+          }
+        }
+        Write-Output \"已保存: \$saved 个附件, 跳过: \$skipped 个\"
+      } catch {
+        Write-Output \"错误: \$_\"
+      }
+      "
+
+  # ── 阶段 3：生成归档清单 ──
+  - name: "生成附件清单"
+    action: shell
+    timeout: 10
+    command: |
+      powershell -NoProfile -Command "
+      \$archive = Join-Path \$env:USERPROFILE 'Documents\\邮件附件归档\\$date_label'
+      \$manifest = Join-Path \$archive '_附件清单.txt'
+      \$now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+      @'
+      ╔══════════════════════════════════╗
+      ║    NL2Shortcut 邮件附件归档清单  ║
+      ╚══════════════════════════════════╝
+
+      归档时间: {0}
+      归档路径: {1}
+
+      附件列表:
+      '@ -f \$now, \$archive | Out-File -FilePath \$manifest -Encoding UTF8
+
+      Get-ChildItem -Path \$archive -File -Exclude '_附件清单.txt' -ErrorAction SilentlyContinue | ForEach-Object {
+        \$sizeKB = [math]::Round(\$_.Length/1KB, 1)
+        '  {0} ({1} KB)' -f \$_.Name, \$sizeKB | Out-File -FilePath \$manifest -Encoding UTF8 -Append
+      }
+
+      \$total = (Get-ChildItem -Path \$archive -File -Exclude '_附件清单.txt' -ErrorAction SilentlyContinue | Measure-Object).Count
+      @'
+
+      ────────────────────
+      总计: {0} 个附件
+      '@ -f \$total | Out-File -FilePath \$manifest -Encoding UTF8 -Append
+
+      Write-Output \"清单已生成: \$total 个附件\"
+      "
+
+  # ── 阶段 4：快捷键展示结果 ──
+  - name: "等待文件写入完成"
+    action: wait
+    command: 500ms
+
+  - name: "Win+E 打开归档目录"
+    action: shortcut
+    command: Win+E
+
+  - name: "等待资源管理器加载"
+    action: wait
+    command: 1000ms
+
+  - name: "Ctrl+L 跳转地址栏"
+    action: shortcut
+    command: Ctrl+L
+
+  - name: "输入归档路径"
+    action: type
+    command: "%USERPROFILE%\\Documents\\邮件附件归档\\$date_label"
+
+  - name: "Enter 导航到归档目录"
+    action: shortcut
+    command: Enter

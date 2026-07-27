@@ -1,0 +1,19 @@
+# Auto-saved from execution: 把报告复制文件到桌面
+# Status: success, Mode: composite
+name: 把报告复制文件到桌面-ok
+description: '[OK] 把报告复制文件到桌面 (dry-run)'
+version: '1.0'
+variables: {}
+steps:
+- name: Win+R 打开「运行」对话框
+  action: shortcut
+  command: Win+R
+- name: Enter（按需求工作流：确认运行框就绪）
+  action: shortcut
+  command: Enter
+- name: 输入命令：cmd /c copy "报告" "C:\Users\Deng2\Desktop"
+  action: type
+  command: cmd /c copy "报告" "C:\Users\Deng2\Desktop"
+- name: Enter 执行复制
+  action: shortcut
+  command: Enter

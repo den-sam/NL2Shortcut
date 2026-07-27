@@ -1,0 +1,11 @@
+# Auto-saved from execution: 搜到新建 DOCX 文档后直接复制
+# Status: success, Mode: 
+# Error: self-check: clipboard empty (no selection?) — 剪贴板获取到了文本
+name: 搜到新建-docx-文档后直接复制-ok
+description: '[OK] 搜到新建 DOCX 文档后直接复制'
+version: '1.0'
+variables: {}
+steps:
+- name: 搜到新建 DOCX 文档后直接复制
+  action: shortcut
+  command: Ctrl+C

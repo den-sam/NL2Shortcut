@@ -1,0 +1,19 @@
+# Auto-saved from execution: 打开终端
+# Status: success, Mode: composite
+name: 打开终端-ok
+description: '[OK] 打开终端'
+version: '1.0'
+variables: {}
+steps:
+- name: Win+R 打开运行
+  action: shortcut
+  command: Win+R
+- name: 等待运行对话框
+  action: wait
+  command: 200ms
+- name: 输入 cmd
+  action: type
+  command: cmd
+- name: Enter 打开命令行
+  action: shortcut
+  command: Enter

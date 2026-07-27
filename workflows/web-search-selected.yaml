@@ -1,0 +1,12 @@
+name: "网页搜索选中文字"
+description: "复制选中文字 → 在浏览器中用百度搜索"
+steps:
+  - name: 复制选中文字
+    action: shortcut
+    command: 复制
+  - name: 等待复制完成
+    action: wait
+    command: "0.5"
+  - name: 打开浏览器搜索
+    action: shell
+    command: 'start https://www.baidu.com/s?wd=%clipboard%'

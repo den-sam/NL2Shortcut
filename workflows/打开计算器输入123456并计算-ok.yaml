@@ -1,0 +1,10 @@
+# Auto-saved from execution: 打开计算器，输入123+456并计算
+# Status: success, Mode: goal_planner
+name: 打开计算器输入123456并计算-ok
+description: '[OK] 打开计算器，输入123+456并计算'
+version: '1.0'
+variables: {}
+steps:
+- name: 打开计算器，输入123+456并计算
+  action: shortcut
+  command: shell[[shell/ok] calc] → wait[[wait 500ms]] → type[[type] 123+456=]

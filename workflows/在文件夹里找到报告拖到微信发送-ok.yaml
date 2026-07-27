@@ -1,0 +1,28 @@
+# Auto-saved from execution: 在文件夹里找到报告，拖到微信发送
+# Status: success, Mode: composite
+name: 在文件夹里找到报告拖到微信发送-ok
+description: '[OK] 在文件夹里找到报告，拖到微信发送'
+version: '1.0'
+variables: {}
+steps:
+- name: Alt+D 聚焦地址栏，定位源文件夹
+  action: shortcut
+  command: Alt+D
+- name: Ctrl+E 聚焦搜索框
+  action: shortcut
+  command: Ctrl+E
+- name: 输入搜索关键词「到报告，拖到微信发送」
+  action: type
+  command: 到报告，拖到微信发送
+- name: Enter 执行搜索
+  action: shortcut
+  command: Enter
+- name: 等待搜索索引返回结果
+  action: wait
+  command: 800ms
+- name: ↓ 进入结果列表并选中第一项
+  action: shortcut
+  command: Down
+- name: Ctrl+A 选中所有搜索结果
+  action: shortcut
+  command: Ctrl+A

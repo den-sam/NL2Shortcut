@@ -1,0 +1,15 @@
+name: "打开开发环境"
+description: "一键启动终端 + VS Code + 浏览器"
+steps:
+  - name: 打开 Windows Terminal
+    action: shell
+    command: start wt
+  - name: 等待终端启动
+    action: wait
+    command: "2"
+  - name: 打开 VS Code
+    action: shell
+    command: start code
+  - name: 打开浏览器
+    action: shell
+    command: start https://github.com

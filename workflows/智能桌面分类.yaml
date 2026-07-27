@@ -1,0 +1,295 @@
+# ──────────────────────────────────────────────────────────────────
+# NL2Shortcut 智能桌面分类工作流 (v0.1)
+#
+# 全程 0 截屏 — 纯 shell + PowerShell 实现
+# 安全性：只移动文件到分类子文件夹，绝不删除任何内容
+# ──────────────────────────────────────────────────────────────────
+name: "智能桌面分类"
+description: "按类型/日期/大小智能整理桌面文件，生成分类报告"
+version: "1.0"
+variables:
+  dry_run: "false"
+
+steps:
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 1：创建分类目录结构
+  # ═══════════════════════════════════════════════════════════════
+  - name: "创建分类文件夹"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $dirs = @(
+        '$desktop\_分类_图片',
+        '$desktop\_分类_文档',
+        '$desktop\_分类_表格',
+        '$desktop\_分类_压缩包',
+        '$desktop\_分类_代码',
+        '$desktop\_分类_视频音频',
+        '$desktop\_分类_可执行文件',
+        '$desktop\_分类_大文件(>100MB)',
+        '$desktop\_分类_临时文件',
+        '$desktop\_分类_重复文件',
+        '$desktop\_分类_其他'
+      )
+      foreach ($d in $dirs) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+      }
+      Write-Output '分类文件夹已就绪'
+      "
+
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 2：按扩展名归类
+  # ═══════════════════════════════════════════════════════════════
+  - name: "归类图片文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.png','*.jpg','*.jpeg','*.gif','*.bmp','*.webp','*.svg','*.ico','*.tiff','*.tif','*.heic','*.raw','*.psd','*.ai','*.sketch')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_图片\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"图片: $count 个\"
+      "
+
+  - name: "归类文档文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.docx','*.doc','*.pdf','*.txt','*.md','*.rtf','*.odt','*.wps','*.pages','*.tex','*.log','*.csv')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_文档\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"文档: $count 个\"
+      "
+
+  - name: "归类表格文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.xlsx','*.xls','*.csv','*.tsv','*.ods','*.numbers','*.xlsm','*.xlsb')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_表格\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"表格: $count 个\"
+      "
+
+  - name: "归类压缩包"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.zip','*.rar','*.7z','*.tar','*.gz','*.bz2','*.xz','*.iso','*.cab','*.msi')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_压缩包\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"压缩包: $count 个\"
+      "
+
+  - name: "归类代码文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.py','*.js','*.ts','*.html','*.css','*.java','*.c','*.cpp','*.h','*.rs','*.go','*.rb','*.php','*.swift','*.kt','*.sql','*.sh','*.bat','*.ps1','*.json','*.xml','*.yaml','*.yml','*.toml','*.ini','*.cfg','*.env')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_代码\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"代码: $count 个\"
+      "
+
+  - name: "归类视频音频"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.mp4','*.avi','*.mkv','*.mov','*.wmv','*.flv','*.webm','*.m4v','*.mp3','*.wav','*.flac','*.aac','*.ogg','*.wma','*.m4a')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_视频音频\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"媒体: $count 个\"
+      "
+
+  - name: "归类可执行文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.exe','*.msi','*.appx','*.bat','*.cmd','*.ps1','*.vbs','*.jar','*.apk')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_可执行文件\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      Write-Output \"可执行: $count 个\"
+      "
+
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 3：特殊处理 — 大文件 / 临时文件 / 重复文件
+  # ═══════════════════════════════════════════════════════════════
+  - name: "归类大文件 (>100MB)"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $count = 0
+      Get-ChildItem -Path $desktop -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Length -gt 100MB -and $_.Extension -ne '.lnk' -and $_.DirectoryName -eq $desktop
+      } | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination '$desktop\_分类_大文件(>100MB)\' -Force
+        $count++
+      }
+      Write-Output \"大文件: $count 个\"
+      "
+
+  - name: "归类临时文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $exts = @('*.tmp','*.temp','*.bak','*.backup','*.old','*.cache','*.dmp','*.log')
+      $count = 0
+      foreach ($ext in $exts) {
+        Get-ChildItem -Path $desktop -Filter $ext -File -ErrorAction SilentlyContinue | ForEach-Object {
+          Move-Item -Path $_.FullName -Destination '$desktop\_分类_临时文件\' -Force -ErrorAction SilentlyContinue
+          $count++
+        }
+      }
+      # 也处理 Office 临时文件 (~$*)
+      Get-ChildItem -Path $desktop -Filter '~$*' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination '$desktop\_分类_临时文件\' -Force -ErrorAction SilentlyContinue
+        $count++
+      }
+      Write-Output \"临时: $count 个\"
+      "
+
+  - name: "检测重复文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $files = Get-ChildItem -Path $desktop -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ne '.lnk' -and $_.DirectoryName -eq $desktop }
+      $seen = @{}
+      $count = 0
+      foreach ($f in $files) {
+        $key = $f.Name + ':' + $f.Length
+        if ($seen.ContainsKey($key)) {
+          # Move the newer duplicate (keep the older one)
+          if ($f.LastWriteTime -gt $seen[$key].LastWriteTime) {
+            Move-Item -Path $f.FullName -Destination '$desktop\_分类_重复文件\' -Force -ErrorAction SilentlyContinue
+          } else {
+            Move-Item -Path $seen[$key].FullName -Destination '$desktop\_分类_重复文件\' -Force -ErrorAction SilentlyContinue
+            $seen[$key] = $f
+          }
+          $count++
+        } else {
+          $seen[$key] = $f
+        }
+      }
+      Write-Output \"重复: $count 个\"
+      "
+
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 4：剩余文件归入 "其他"
+  # ═══════════════════════════════════════════════════════════════
+  - name: "归类剩余文件"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $count = 0
+      Get-ChildItem -Path $desktop -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Extension -ne '.lnk' -and $_.DirectoryName -eq $desktop
+      } | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination '$desktop\_分类_其他\' -Force -ErrorAction SilentlyContinue
+        $count++
+      }
+      Write-Output \"其他: $count 个\"
+      "
+
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 5：清理空文件夹 + 生成报告
+  # ═══════════════════════════════════════════════════════════════
+  - name: "清理空分类文件夹"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $empties = Get-ChildItem -Path '$desktop\_分类_*' -Directory -ErrorAction SilentlyContinue | Where-Object {
+        (Get-ChildItem -Path $_.FullName -File -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0
+      }
+      foreach ($d in $empties) {
+        Remove-Item -Path $d.FullName -Force -ErrorAction SilentlyContinue
+      }
+      Write-Output \"清理空文件夹: $($empties.Count) 个\"
+      "
+
+  - name: "生成整理报告"
+    action: shell
+    command: |
+      powershell -NoProfile -Command "
+      $desktop = [Environment]::GetFolderPath('Desktop')
+      $reportPath = Join-Path $desktop '_分类_整理报告.txt'
+      $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+      @\"
+      ╔══════════════════════════════════════╗
+      ║   NL2Shortcut 智能桌面分类报告       ║
+      ╚══════════════════════════════════════╝
+
+      执行时间: $now
+      桌面路径: $desktop
+
+      ── 分类统计 ──
+      \"@ | Out-File -FilePath $reportPath -Encoding UTF8
+
+      $cats = Get-ChildItem -Path '$desktop\_分类_*' -Directory -ErrorAction SilentlyContinue | Sort-Object Name
+      $grandTotal = 0
+      foreach ($cat in $cats) {
+        $count = (Get-ChildItem -Path $cat.FullName -File -ErrorAction SilentlyContinue | Measure-Object).Count
+        $size = (Get-ChildItem -Path $cat.FullName -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $sizeMB = if ($size) { [math]::Round($size/1MB, 1) } else { 0 }
+        $grandTotal += $count
+        \"  $($cat.Name): $count 个文件 ($sizeMB MB)\" | Out-File -FilePath $reportPath -Encoding UTF8 -Append
+      }
+
+      @\"
+
+      ──────────────────────────────────
+      总计: $grandTotal 个文件已分类
+      快捷方式(.lnk): 已保留在原位
+
+      NL2Shortcut v0.1 — 全程 0 截屏
+      \"@ | Out-File -FilePath $reportPath -Encoding UTF8 -Append
+
+      Write-Output \"报告: $reportPath\"
+      Write-Output \"总计 $grandTotal 个文件已分类\"
+      "

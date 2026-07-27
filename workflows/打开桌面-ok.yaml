@@ -1,0 +1,10 @@
+# Auto-saved from execution: 打开桌面
+# Status: success, Mode: 
+name: 打开桌面-ok
+description: '[OK] 打开桌面 (dry-run)'
+version: '1.0'
+variables: {}
+steps:
+- name: 打开桌面
+  action: shortcut
+  command: Ctrl+O

@@ -1,0 +1,17 @@
+name: "系统信息报告"
+description: "收集系统信息并保存为报告文件到桌面"
+steps:
+  - name: 生成时间戳
+    action: python
+    command: "datetime.datetime.now().strftime('%Y%m%d_%H%M%S')"
+    capture: ts
+  - name: 收集系统信息
+    action: shell
+    command: 'echo 主机名: %COMPUTERNAME% && echo 用户: %USERNAME% && echo 系统盘: %SystemDrive% && systeminfo | findstr /B /C:"OS Name" /C:"Total Physical Memory" /C:"Available Physical Memory"'
+    capture: sysinfo
+  - name: 保存报告
+    action: file
+    command: "$USERPROFILE\\Desktop\\system_report_$ts.txt"
+    args:
+      mode: w
+      content: "$sysinfo"

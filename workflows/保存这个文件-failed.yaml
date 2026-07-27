@@ -1,0 +1,11 @@
+# Auto-saved from execution: 保存这个文件
+# Status: failed, Mode: 
+# Error: No shortcut mapping for: save
+name: 保存这个文件-failed
+description: '[FAILED] 保存这个文件'
+version: '1.0'
+variables: {}
+steps:
+- name: 保存这个文件
+  action: shortcut
+  command: save

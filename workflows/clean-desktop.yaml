@@ -1,0 +1,13 @@
+name: "整理桌面"
+description: "将桌面散落文件按日期归档到整理文件夹"
+steps:
+  - name: 生成归档日期
+    action: python
+    command: "datetime.datetime.now().strftime('%Y%m%d_%H%M')"
+    capture: archive_name
+  - name: 创建归档目录
+    action: shell
+    command: 'mkdir "%USERPROFILE%\\Desktop\\整理_$archive_name" 2>nul'
+  - name: 移动散落文件
+    action: shell
+    command: 'for %f in ("%USERPROFILE%\\Desktop\\*.*") do @if not "%~xf"==".lnk" move "%~ff" "%USERPROFILE%\\Desktop\\整理_$archive_name\\" 2>nul'

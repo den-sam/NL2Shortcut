@@ -1,0 +1,29 @@
+name: "初始化新项目"
+description: "创建项目目录 → 初始化 Git → 创建 README → 用 VS Code 打开"
+variables:
+  project_name: "my-project"
+steps:
+  - name: 进入桌面
+    action: shell
+    command: 'cd /d "%USERPROFILE%\\Desktop"'
+  - name: 创建项目目录
+    action: shell
+    command: 'mkdir "%USERPROFILE%\\Desktop\\$project_name" 2>nul'
+  - name: 初始化 Git
+    action: shell
+    command: 'cd /d "%USERPROFILE%\\Desktop\\$project_name" && git init'
+  - name: 创建 README
+    action: file
+    command: "$USERPROFILE\\Desktop\\$project_name\\README.md"
+    args:
+      mode: w
+      content: "# $project_name\n\n项目初始化于 $(date) \n"
+  - name: 用 VS Code 打开
+    action: shell
+    command: 'code "%USERPROFILE%\\Desktop\\$project_name"'
+  - name: 创建 .gitignore
+    action: file
+    command: "$USERPROFILE\\Desktop\\$project_name\\.gitignore"
+    args:
+      mode: w
+      content: "__pycache__/\n*.pyc\n.env\n.vscode/\nnode_modules/\n"

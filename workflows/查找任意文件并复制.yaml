@@ -1,0 +1,39 @@
+name: 查找任意文件并复制
+description: "打开任意文件所在位置并复制到剪贴板 — 通过 Win+E 导航 + 搜索定位文件"
+version: "1.0"
+variables:
+  file_path: "C:\\Users\\Deng2\\Desktop\\英语单词表.docx"
+steps:
+  - name: Win+E 打开资源管理器
+    action: shortcut
+    command: Win+E
+  - name: 等待资源管理器窗口加载
+    action: wait
+    command: 1000ms
+  - name: Ctrl+E 聚焦搜索框
+    action: shortcut
+    command: Ctrl+E
+  - name: Ctrl+A 全选清空搜索框原有内容
+    action: shortcut
+    command: Ctrl+A
+  - name: 输入文件完整路径
+    action: type
+    command: $file_path
+  - name: 等待路径完整写入
+    action: wait
+    command: 1500ms
+  - name: Enter 触发搜索/定位文件
+    action: shortcut
+    command: Enter
+  - name: 等待搜索结果加载
+    action: wait
+    command: 1000ms
+  - name: Space 将焦点切换到搜索结果列表（首项自动选中）
+    action: shortcut
+    command: Space
+  - name: 等待焦点切换
+    action: wait
+    command: 300ms
+  - name: Ctrl+C 复制选中文件到剪贴板
+    action: shortcut
+    command: Ctrl+C

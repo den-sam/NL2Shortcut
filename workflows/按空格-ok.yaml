@@ -1,0 +1,10 @@
+# Auto-saved from execution: 按空格
+# Status: success, Mode: 
+name: 按空格-ok
+description: '[OK] 按空格'
+version: '1.0'
+variables: {}
+steps:
+- name: 按空格
+  action: shortcut
+  command: Space

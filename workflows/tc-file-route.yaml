@@ -1,0 +1,108 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NL2Shortcut 示例私包 #4：Total Commander 文件路由
+#
+# 在 Total Commander 双面板之间按规则路由文件：
+#   全选/单选当前面板文件 → Tab 确认目标面板 → F5(复制)/F6(移动) → 确认
+#
+# Total Commander 是 Windows 上最强大的双面板文件管理器。
+# 官网：https://www.ghisler.com
+#
+# 使用步骤：
+#   1. 确保 Total Commander 正在运行且为当前活动窗口
+#   2. 两个面板已分别定位到源目录（左）和目标目录（右）
+#   3. 光标在源文件所在面板中
+#   4. 执行此工作流
+#
+# TC 核心快捷键速查：
+#   Tab       — 左右面板切换           F5  — 复制选中文件
+#   Space     — 选中/取消光标处文件     F6  — 移动/重命名
+#   Ctrl+A    — 全选                   F7  — 新建文件夹
+#   Ctrl+\    — 跳转到根目录           F8  — 删除
+#   Ctrl+D    — 目录热列表             Ctrl+R — 刷新面板
+#   Ctrl+→    — 在另一面板打开目录      Alt+F1/F2 — 切换驱动器
+# ═══════════════════════════════════════════════════════════════════════
+name: "Total Commander 文件路由"
+description: "在 Total Commander 中选中文件并移动/复制到另一面板的目标目录"
+version: "1.0"
+variables:
+  # "copy" = F5 复制, "move" = F6 移动
+  operation: "copy"
+  # "all" = Ctrl+A 全选, "space" = 光标处单个 Space 选中
+  selection: "all"
+
+steps:
+  # ═══════════════════════════════════════════════════════════════════
+  # 阶段 1：选中源文件
+  # ═══════════════════════════════════════════════════════════════════
+  - name: "Ctrl+A 全选当前面板所有文件"
+    action: shortcut
+    command: Ctrl+A
+    condition: "ctx.get('selection','all') == 'all'"
+
+  - name: "等待全选"
+    action: wait
+    command: 150ms
+    condition: "ctx.get('selection','all') == 'all'"
+
+  - name: "Space 选中光标处单个文件"
+    action: shortcut
+    command: Space
+    condition: "ctx.get('selection','all') == 'space'"
+
+  - name: "等待选中"
+    action: wait
+    command: 100ms
+    condition: "ctx.get('selection','all') == 'space'"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 阶段 2：交叉确认目标面板
+  # ═══════════════════════════════════════════════════════════════════
+  - name: "Tab 切换到另一面板确认目标"
+    action: shortcut
+    command: Tab
+  - name: "等待面板切换"
+    action: wait
+    command: 200ms
+
+  - name: "Tab 切回源面板"
+    action: shortcut
+    command: Tab
+  - name: "等待面板切换"
+    action: wait
+    command: 200ms
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 阶段 3：执行移动或复制
+  # ═══════════════════════════════════════════════════════════════════
+  - name: "F6 移动文件到对侧面板目录"
+    action: shortcut
+    command: F6
+    condition: "ctx.get('operation','copy') == 'move'"
+
+  - name: "F5 复制文件到对侧面板目录"
+    action: shortcut
+    command: F5
+    condition: "ctx.get('operation','copy') == 'copy'"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 阶段 4：确认 + 查看结果
+  # ═══════════════════════════════════════════════════════════════════
+  - name: "等待 TC 弹出确认对话框"
+    action: wait
+    command: 300ms
+
+  - name: "Enter 确认操作"
+    action: shortcut
+    command: Enter
+
+  - name: "等待文件操作完成"
+    action: wait
+    command: 1000ms
+
+  - name: "Tab 切换到目标面板查看结果"
+    action: shortcut
+    command: Tab
+
+  - name: "Ctrl+R 刷新面板"
+    action: shortcut
+    command: Ctrl+R
