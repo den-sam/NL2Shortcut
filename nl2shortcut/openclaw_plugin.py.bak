@@ -1,0 +1,172 @@
+"""OpenClaw plugin for SCut.
+
+Exposes scut as an 'action plugin' to OpenClaw agents. The agent can
+discover what scut offers, and call /v1/execute via HTTP.
+
+Usage from OpenClaw config (~/.openclaw/config.json or workspace):
+{
+  "plugins": [
+    {
+      "name": "scut-execution-endpoint",
+      "module": "scut_plugin",
+      "endpoint": "http://127.0.0.1:7770",
+      "actions": ["keyboard_shortcut"]
+    }
+  ]
+}
+
+This module is self-contained — it can be imported from anywhere; it
+just talks HTTP to a running scut agent-api instance.
+"""
+
+import json
+import time
+from typing import Any, Dict, List, Optional
+from urllib import request as urlrequest
+from urllib.error import URLError, HTTPError
+
+
+class ScutClient:
+    """Minimal client for the scut Agent API."""
+
+    def __init__(self, endpoint: str = "http://127.0.0.1:7770", timeout: float = 5.0):
+        self.endpoint = endpoint.rstrip("/")
+        self.timeout = timeout
+
+    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{self.endpoint}{path}"
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urlrequest.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlrequest.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _get(self, path: str) -> Dict[str, Any]:
+        url = f"{self.endpoint}{path}"
+        with urlrequest.urlopen(url, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def health(self) -> Dict[str, Any]:
+        return self._get("/v1/health")
+
+    def capabilities(self) -> Dict[str, Any]:
+        return self._get("/v1/capabilities")
+
+    def execute(self, intent: str, *, dry_run: bool = False, request_id: Optional[str] = None) -> Dict[str, Any]:
+        return self._post("/v1/execute", {
+            "intent": intent,
+            "dry_run": dry_run,
+            "request_id": request_id,
+        })
+
+    def recognize(self, intent: str) -> Dict[str, Any]:
+        return self._post("/v1/recognize", {"intent": intent})
+
+    def sequence(self, steps: List[Dict[str, Any]], stop_on_error: bool = True) -> Dict[str, Any]:
+        return self._post("/v1/sequence", {"steps": steps, "stop_on_error": stop_on_error})
+
+
+# ── OpenClaw plugin manifest ──────────────────────────────────────────
+#
+# OpenClaw discovers plugins via this manifest, then calls actions
+# via the JSON-RPC-ish surface.
+
+PLUGIN_MANIFEST = {
+    "name": "scut-keyboard",
+    "version": "1.0.0",
+    "description": "SCut is the high-speed execution endpoint for AI Agents. Turn intent (NL or API call) into keyboard/mouse actions with <5ms p50 latency. 51 built-in actions, 30+ apps, structured stability/API-equivalent/GUI-fallback metadata.",
+    "endpoint": "http://127.0.0.1:7770",
+    "actions": [
+        {
+            "name": "execute_shortcut",
+            "description": "Execute a keyboard shortcut from natural language",
+            "params": {
+                "intent":        {"type": "string",  "required": True,  "description": "Natural language like 'save the file'"},
+                "dry_run":       {"type": "boolean", "required": False, "default": False},
+                "request_id":    {"type": "string",  "required": False, "description": "Idempotency key for retries"},
+            },
+            "returns": {
+                "ok":            {"type": "boolean"},
+                "command":       {"type": "string"},
+                "keys":          {"type": "string"},
+                "confidence":    {"type": "number"},
+                "alternatives":  {"type": "array"},
+                "metadata":      {"type": "object", "description": "Agent metadata: api_equivalent, gui_fallback, stability"},
+            },
+        },
+        {
+            "name": "recognize_intent",
+            "description": "Recognize which shortcut an intent maps to, without executing",
+            "params": {"intent": {"type": "string", "required": True}},
+            "returns": {
+                "command":      {"type": "string"},
+                "confidence":   {"type": "number"},
+                "alternatives": {"type": "array"},
+            },
+        },
+        {
+            "name": "list_capabilities",
+            "description": "List all shortcuts scut knows about, with agent metadata",
+            "params": {},
+            "returns": {"shortcuts": {"type": "array"}},
+        },
+        {
+            "name": "execute_sequence",
+            "description": "Execute a multi-step plan atomically",
+            "params": {
+                "steps":          {"type": "array", "required": True, "items": {"intent": "string"}},
+                "stop_on_error":  {"type": "boolean", "default": True},
+            },
+            "returns": {"steps": {"type": "array"}, "ok": {"type": "boolean"}},
+        },
+    ],
+    # Decision support: tell the agent when to prefer scut over other tools
+    "routing_hints": {
+        "prefer_when": [
+            "User wants to execute a keyboard shortcut",
+            "Task involves copy/paste/save/undo/redo/format",
+            "Agent needs to know 'is there a programmatic API for this action?'",
+        ],
+        "fallback_when": [
+            "scut returns confidence < 0.4",
+            "scut returns 'no_match' error code",
+            "Application version is incompatible with shortcut",
+        ],
+        "complementary_to": [
+            "computer-use (when shortcut doesn't exist)",
+            "browser tools (for web-specific actions)",
+            "file tools (for batch operations on the filesystem)",
+        ],
+    },
+}
+
+
+def handle_action(action: str, params: Dict[str, Any], client: Optional[ScutClient] = None) -> Dict[str, Any]:
+    """OpenClaw entry point: dispatch an action call to scut."""
+    cli = client or ScutClient()
+    if action == "execute_shortcut":
+        return cli.execute(**{k: v for k, v in params.items() if k in ("intent", "dry_run", "request_id")})
+    if action == "recognize_intent":
+        return cli.recognize(intent=params["intent"])
+    if action == "list_capabilities":
+        return cli.capabilities()
+    if action == "execute_sequence":
+        return cli.sequence(steps=params["steps"], stop_on_error=params.get("stop_on_error", True))
+    return {"ok": False, "error": {"code": "unknown_action", "message": f"action '{action}' not handled"}}
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--manifest":
+        print(json.dumps(PLUGIN_MANIFEST, ensure_ascii=False, indent=2))
+    else:
+        cli = ScutClient()
+        try:
+            h = cli.health()
+            print(f"[scut-plugin] connected: {h}")
+        except (URLError, HTTPError) as e:
+            print(f"[scut-plugin] cannot reach scut agent-api at {cli.endpoint}: {e}", file=sys.stderr)
+            print("Start it with: scut agent-api", file=sys.stderr)
