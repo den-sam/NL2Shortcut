@@ -225,6 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
     mp.add_argument("--dry-run", action="store_true", help="仅识别不执行")
     mp.add_argument("--timeout", type=float, default=5.0, help="超时秒数")
 
+    smp = sp.add_parser("smart",
+                        help="智能执行：先查已有工作流 → 未命中则 LLM 拆解 → 自动保存")
+    smp.add_argument("text", nargs="+", help="自然语言指令")
+    smp.add_argument("--dry-run", action="store_true", help="仅预览不执行")
+    smp.add_argument("--no-save", action="store_true", help="不自动保存生成的工作流")
+
     plp = sp.add_parser("plan", help="把目标拆成多步执行计划 (DeepSeek)")
     plp.add_argument("goal", nargs="+", help="目标，如「把这份报告发出去」")
     plp.add_argument("--dry-run", action="store_true", help="仅生成计划不执行")
@@ -454,6 +460,89 @@ def _save_workflow(text: str, steps: list) -> None:
                        "variables": {}, "steps": wf_steps}, f,
                       allow_unicode=True, default_flow_style=False, sort_keys=False)
         print(f"💾 已保存工作流：{wf_name}")
+
+
+def cmd_smart(master, args) -> int:
+    """智能执行管道: 工作流匹配 → 拆解 → 执行 → 自动保存。"""
+    text = " ".join(args.text)
+    if not text:
+        print("Error: No command text provided.", file=sys.stderr)
+        return 1
+
+    print(f"🤖 智能执行：「{text}」")
+    print()
+
+    result = master.smart_execute(
+        text,
+        dry_run=args.dry_run,
+        auto_save=not args.no_save,
+    )
+
+    pipeline = result["pipeline"]
+    elapsed = result["elapsed_ms"]
+
+    if pipeline == "workflow_match":
+        wf_name = result["matched_workflow"]
+        conf = result["match_confidence"]
+        print(f"🔍 匹配到已有工作流：「{wf_name}」(置信度 {conf:.0%})")
+        print(f"⏱️  耗时 {elapsed:.0f}ms")
+
+        if args.dry_run:
+            for r in result["results"]:
+                status = "✅" if r["success"] else "❌"
+                print(f"  {status} {r['step']}: {r['output']}")
+            print("⚠️  dry-run，未实际执行。")
+            return 0
+
+        ok_count = sum(1 for r in result["results"] if r["success"])
+        print(f"📊 执行了 {ok_count}/{result['steps_executed']} 步")
+        for r in result["results"]:
+            status = "✅" if r["success"] else "❌"
+            print(f"  {status} {r['step']}: {r['output']}")
+        if result["error"]:
+            print(f"⚠️  {result['error']}")
+        return 0 if result["ok"] else 1
+
+    elif pipeline == "planner_generated":
+        plan = result.get("plan", {})
+        steps_list = plan.get("steps", [])
+        print(f"🆕 LLM 拆解为目标计划（{len(steps_list)} 步）")
+        print(f"💡 {plan.get('reasoning', '')}")
+        for i, s in enumerate(steps_list):
+            desc = s.get("description", "")
+            action = s.get("action", "?")
+            detail = s.get("key_combination") or s.get("text") or s.get("command") or ""
+            print(f"  {i+1:2d}. [{action}] {desc}")
+            if detail:
+                print(f"       └ {detail}")
+
+        if args.dry_run:
+            print(f"\n⏱️  耗时 {elapsed:.0f}ms")
+            print("⚠️  dry-run，未实际执行。")
+            return 0
+
+        print(f"\n📊 执行结果 ({elapsed:.0f}ms)：")
+        for r in result["results"]:
+            status = "✅" if r["success"] else "❌"
+            print(f"  {status} {r['step']}: {r.get('output', '')}")
+            if r.get("error"):
+                print(f"       ⚠️  {r['error']}")
+
+        if result["auto_saved"]:
+            path = result.get("auto_saved_path", "")
+            print(f"\n💾 自动保存为工作流：{Path(path).stem}" if path else "")
+
+        return 0 if result["ok"] else 1
+
+    elif pipeline == "single_shortcut":
+        r = result["results"][0] if result["results"] else {}
+        print(f"⚡ 单快捷键：{r.get('output', '')}")
+        print(f"⏱️  耗时 {elapsed:.0f}ms")
+        return 0 if result["ok"] else 1
+
+    else:
+        print(f"❌ 失败：{result.get('error', '未知错误')}")
+        return 1
 
 
 def cmd_master(master, args) -> int:
@@ -1003,7 +1092,7 @@ def main(args=None):
     if args is None:
         args = _sys.argv[1:]
     valid_cmds = {"exec","run","list","search","stats","benchmark","repl","gui",
-                  "master","plan","suggest","start-server","stop-server","type",
+                  "master","smart","plan","suggest","start-server","stop-server","type",
                   "click","scroll","screenshot","mouse","find","overlay",
                   "mcp-server","agent-api","composite","workflow","self-test"}
     if args and args[0] not in valid_cmds and not args[0].startswith("-"):
@@ -1013,11 +1102,12 @@ def main(args=None):
     args = parser.parse_args(args)
 
     # Master Agent 专属命令（需 KeyboardMasterAgent）
-    master_cmds = {"master", "plan", "suggest", "start-server", "stop-server", "workflow", "run"}
+    master_cmds = {"master", "smart", "plan", "suggest", "start-server", "stop-server", "workflow", "run"}
     if args.command in master_cmds:
         master = KeyboardMasterAgent()
         handlers = {
             "master": cmd_master,
+            "smart": cmd_smart,
             "plan": cmd_plan,
             "suggest": cmd_suggest,
             "start-server": cmd_start_server,

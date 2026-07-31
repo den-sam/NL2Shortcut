@@ -43,9 +43,11 @@ from .agent import ShortcutAgent
 from .models import (
     Platform, ExecutionResult, Plan,
 )
-from .planner import GoalPlanner
+from .planner import GoalPlanner, plan_to_workflow
 from .operation_memory import OperationMemory
 from .keyboard_primitives import KeyboardPrimitives
+from .workflow_matcher import WorkflowMatcher, MatchResult
+from .workflow import WorkflowEngine
 from . import agent_api
 
 
@@ -94,6 +96,17 @@ class KeyboardMasterAgent:
 
         # 原子键盘原语
         self.primitives = KeyboardPrimitives()
+
+        # 工作流匹配器（LLM 语义搜索已有 YAML 工作流）
+        self.workflow_matcher = WorkflowMatcher(
+            workflows_dir=self.config_dir / "workflows",
+        )
+
+        # 工作流引擎（加载 / 执行 YAML 工作流）
+        self.workflow_engine = WorkflowEngine(
+            agent=self.agent,
+            workflows_dir=self.config_dir / "workflows",
+        )
 
         # server 进程句柄
         self._server_proc: Optional[subprocess.Popen] = None
@@ -144,6 +157,186 @@ class KeyboardMasterAgent:
     def recognize(self, intent: str):
         """仅识别意图（不执行）。"""
         return self.agent.recognize_intent(intent)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 智能执行：工作流匹配 → 执行 / 拆解 → 执行 → 自动保存
+    # ═══════════════════════════════════════════════════════════════════
+    def smart_execute(
+        self,
+        intent: str,
+        dry_run: bool = False,
+        timeout: float = 30.0,
+        learn: bool = True,
+        auto_save: bool = True,
+    ) -> Dict[str, Any]:
+        """智能执行管道 — 先查已有工作流，没有再让 LLM 拆解。
+
+        流程
+        ----
+        1. **工作流匹配**：用 LLM 语义搜索 ``~/.nl2shortcut/workflows/``
+           下所有 YAML 文件，找最匹配的。
+        2. **命中** → 直接加载并执行该工作流（< 500ms，零 LLM 拆解）。
+        3. **未命中** → 调用 GoalPlanner 把自然语言拆成步骤序列 → 执行。
+        4. **自动保存**（auto_save=True）→ 把第 3 步生成的 Plan 保存为 YAML，
+           下次同样的指令就能直接命中。
+
+        Args:
+            intent: 自然语言指令，如「帮我把报告发出去」
+            dry_run: 仅预览不实际按键
+            timeout: 整体超时（秒）
+            learn: 执行成功后是否记录到操作记忆
+            auto_save: 是否自动保存新生成的计划为 YAML 工作流
+
+        Returns:
+            dict::
+                {
+                    "ok": True/False,
+                    "pipeline": "workflow_match" | "planner_generated" | "single_shortcut" | "error",
+                    "matched_workflow": str or None,     # 命中工作流名
+                    "match_confidence": float,             # 匹配置信度
+                    "auto_saved": bool,                    # 是否自动保存为新工作流
+                    "auto_saved_path": str or None,        # 保存路径
+                    "plan": dict or None,                  # Plan.to_dict() 或 None
+                    "steps_executed": int,                 # 执行步数
+                    "results": list[dict],                 # 每步结果
+                    "elapsed_ms": float,
+                    "intent": str,
+                    "error": str or None,
+                }
+        """
+        start = time.perf_counter()
+        result: Dict[str, Any] = {
+            "ok": False,
+            "pipeline": "error",
+            "matched_workflow": None,
+            "match_confidence": 0.0,
+            "auto_saved": False,
+            "auto_saved_path": None,
+            "plan": None,
+            "steps_executed": 0,
+            "results": [],
+            "elapsed_ms": 0.0,
+            "intent": intent,
+            "error": None,
+        }
+
+        if not intent.strip():
+            result["error"] = "intent 为空"
+            result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+            return result
+
+        # ── Step 1: 工作流语义匹配 ──────────────────────────────────
+        match_result: Optional[MatchResult] = None
+        try:
+            match_result = self.workflow_matcher.match(intent)
+        except Exception as e:
+            # 匹配失败不阻塞，直接进入规划
+            match_result = None
+
+        # ── Step 2: 命中 → 加载并执行工作流 ─────────────────────────
+        if match_result and match_result.matched and match_result.workflow:
+            wf_name = match_result.workflow.name
+            result["pipeline"] = "workflow_match"
+            result["matched_workflow"] = wf_name
+            result["match_confidence"] = match_result.workflow.confidence
+
+            try:
+                wf_result = self.workflow_engine.run(
+                    wf_name, dry_run=dry_run,
+                )
+                result["ok"] = wf_result.success
+                result["steps_executed"] = len(wf_result.steps)
+                result["results"] = [
+                    {"step": s.step_name, "success": s.success,
+                     "output": s.output or "", "error": s.error or ""}
+                    for s in wf_result.steps
+                ]
+                if wf_result.error:
+                    result["error"] = wf_result.error
+            except Exception as e:
+                result["error"] = f"执行工作流失败: {e}"
+
+            result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+
+            # 记录到操作记忆
+            if learn and result["ok"]:
+                try:
+                    self.memory.record(
+                        app=self.detect_app() or "common",
+                        action_type="workflow",
+                        action_detail=wf_name,
+                        duration_ms=int(result["elapsed_ms"]),
+                        user_goal=intent,
+                        sequence_id=str(uuid.uuid4()),
+                    )
+                except Exception:
+                    pass
+
+            return result
+
+        # ── Step 3: 未命中 → LLM 拆解为目标计划 ──────────────────────
+        result["pipeline"] = "planner_generated"
+
+        try:
+            plan = self.plan(intent)
+        except Exception as e:
+            result["error"] = f"规划失败: {e}"
+            result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+            return result
+
+        result["plan"] = plan.to_dict()
+
+        # 如果计划为空（LLM 也搞不定）
+        if not plan.steps:
+            # 回退到传统单个快捷键执行
+            result["pipeline"] = "single_shortcut"
+            try:
+                exec_result = self.execute(intent, dry_run=dry_run,
+                                           timeout=timeout, learn=learn)
+                result["ok"] = exec_result.success
+                result["steps_executed"] = 1
+                result["results"] = [{
+                    "step": intent,
+                    "success": exec_result.success,
+                    "output": exec_result.key_combination or "",
+                    "error": exec_result.error or "",
+                }]
+                if exec_result.error:
+                    result["error"] = exec_result.error
+            except Exception as e:
+                result["error"] = f"回退执行失败: {e}"
+            result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+            return result
+
+        # ── Step 4: 执行计划 ─────────────────────────────────────────
+        step_results = self.execute_plan(plan, dry_run=dry_run)
+        all_ok = all(r.success for r in step_results)
+
+        result["ok"] = all_ok
+        result["steps_executed"] = len(step_results)
+        result["results"] = [
+            {
+                "step": r.intent or f"step {i+1}",
+                "success": r.success,
+                "output": r.key_combination or "",
+                "error": r.error or "",
+                "elapsed_ms": r.processing_time * 1000,
+            }
+            for i, r in enumerate(step_results)
+        ]
+
+        # ── Step 5: 自动保存为新工作流 ───────────────────────────────
+        if auto_save and all_ok and plan.source != "fallback":
+            try:
+                saved_path = plan_to_workflow(plan)
+                if saved_path:
+                    result["auto_saved"] = True
+                    result["auto_saved_path"] = str(saved_path)
+            except Exception:
+                pass
+
+        result["elapsed_ms"] = (time.perf_counter() - start) * 1000
+        return result
 
     # ═══════════════════════════════════════════════════════════════════
     # 规划：目标 → 多步计划

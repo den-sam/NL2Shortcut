@@ -546,9 +546,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, out)
 
     def _execute(self, body: Dict[str, Any], auth_ctx: Dict[str, Any]):
-        """POST /v1/execute  {intent, dry_run?, context?, session_id?, app?, fallback_policy?, selfcheck?}
+        """POST /v1/execute  {intent, dry_run?, context?, session_id?, app?, fallback_policy?, selfcheck?, smart?}
 
-        Execute one intent via the keyboard tier. Returns ExecutionResult.
+        When ``"smart": true`` → 智能管道：匹配已有工作流 → 未命中则 LLM 拆解 → 自动保存。
+        Otherwise → Execute one intent via the keyboard tier. Returns ExecutionResult.
         """
         intent = body.get("intent", "").strip()
         if not intent:
@@ -558,6 +559,40 @@ class _Handler(BaseHTTPRequestHandler):
                 "error": {"code": E_BAD_REQUEST, "message": "'intent' is required"},
             })
         dry_run = bool(body.get("dry_run", False))
+
+        # ═══════════ Smart pipeline: workflow match → plan → execute → save ═══════════
+        if bool(body.get("smart", False)):
+            try:
+                from .master import KeyboardMasterAgent
+                master = KeyboardMasterAgent()
+                result = master.smart_execute(
+                    intent,
+                    dry_run=dry_run,
+                    auto_save=not body.get("no_save", False),
+                )
+                return self._send_json(200 if result["ok"] else 422, {
+                    "ok": result["ok"],
+                    "mode": "smart",
+                    "pipeline": result["pipeline"],
+                    "matched_workflow": result["matched_workflow"],
+                    "match_confidence": result["match_confidence"],
+                    "auto_saved": result["auto_saved"],
+                    "auto_saved_path": result["auto_saved_path"],
+                    "plan": result["plan"],
+                    "steps_executed": result["steps_executed"],
+                    "results": result["results"],
+                    "elapsed_ms": result["elapsed_ms"],
+                    "intent": result["intent"],
+                    "error": result["error"],
+                })
+            except Exception as e:
+                return self._send_json(500, {
+                    "ok": False,
+                    "status": "failed",
+                    "error": {"code": E_INTERNAL, "message": f"smart execute failed: {e}"},
+                })
+
+        # ═══════════ Standard execution path ═══════════
         context = body.get("context") or {}
         session_id = body.get("session_id")
         app = body.get("app", "")
