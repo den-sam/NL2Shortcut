@@ -35,6 +35,8 @@ from typing import Optional
 
 from .models import ExecutionResult, Platform
 from .llm import DeepSeekEngine, _load_api_key, DEEPSEEK_BASE_URL, DEEPSEEK_CHAT_MODEL, REQUEST_TIMEOUT
+from .context_store import SemanticCache, MinimalContext
+from .model_router import ModelRouter
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Classes — Keyboard-Level Plan
@@ -530,15 +532,25 @@ class GoalPlanner:
     ==========  ==========================================
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None,
+                 shared_cache: Optional[SemanticCache] = None,
+                 router: Optional[ModelRouter] = None):
         """
         Args:
             api_key: DeepSeek API Key。若为 None，从环境变量 / 配置文件中加载。
+            shared_cache: 可选外部共享缓存实例（来自 ContextStore）。
+            router: 可选 ModelRouter 实例（用于 AVR 路由）。
         """
         self._api_key = api_key or _load_api_key()
         self._available = bool(self._api_key)
         self._last_error: Optional[str] = None
         self._adapter = None   # lazy
+
+        # 语义缓存：可接受外部共享实例
+        self._cache = shared_cache or SemanticCache()
+
+        # 模型路由：AVR 调度（可选）
+        self._router = router
 
     @property
     def available(self) -> bool:
@@ -552,7 +564,8 @@ class GoalPlanner:
     # ── Public API ─────────────────────────────────────────────────────────
 
     def plan(self, goal: str, context: Optional[dict] = None,
-             memory_hints: str = "") -> Plan:
+             memory_hints: str = "", app_name: str = "",
+             ctx: Optional[MinimalContext] = None) -> Plan:
         """将自然语言目标分解为执行计划。
 
         Args:
@@ -567,6 +580,7 @@ class GoalPlanner:
                 - ``open_apps``: 当前打开的应用列表
             memory_hints: 操作记忆建议文本（来自 OperationMemory），
                 注入 LLM prompt 中作为高优先级参考。
+            app_name: 当前应用名（用于缓存键区分）。
 
         Returns:
             Plan 对象，包含 steps、reasoning、estimated_time_ms 等。
@@ -583,8 +597,30 @@ class GoalPlanner:
                 error="目标为空",
             )
 
+        # 从 context 中提取 app_name（若未显式传入）
+        resolved_app = app_name or (context or {}).get("app_name", "")
+
+        # ── 跨请求语义缓存检查 ──
+        cached = self._cache.get(goal, resolved_app)
+        if cached is not None:
+            restored = _restore_plan_from_cache(cached)
+            if restored is not None:
+                return restored
+
+        # ── AVR 路由决策 ──
+        if self._router and ctx:
+            decision = self._router.route(ctx)
+            if not decision.should_call_llm:
+                fallback = _make_fallback_plan(goal)
+                fallback.error = f"AVR 跳过 LLM: {decision.reason}"
+                return fallback
+
         try:
-            return self._call_llm(goal, context or {}, memory_hints)
+            plan_result = self._call_llm(goal, context or {}, memory_hints)
+            # 缓存成功的 LLM 规划结果
+            if plan_result.source == "llm" and plan_result.steps:
+                self._cache.set(goal, resolved_app, plan_result.to_dict())
+            return plan_result
         except Exception as e:
             self._last_error = str(e)
             fallback = _make_fallback_plan(goal)
@@ -1057,5 +1093,23 @@ def plan_to_workflow(
             f.write(f"# Confidence: {plan.confidence:.0%}  |  Steps: {plan.total_steps}\n")
             yaml.dump(doc, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
         return filepath
+    except Exception:
+        return None
+
+
+def _restore_plan_from_cache(d: dict) -> Optional[Plan]:
+    """从缓存 dict 恢复 Plan 对象。"""
+    try:
+        steps = [PlanStep.from_dict(s) for s in d.get("steps", [])]
+        return Plan(
+            goal=d.get("goal", ""),
+            steps=steps,
+            reasoning=d.get("reasoning", ""),
+            total_steps=d.get("total_steps", len(steps)),
+            estimated_time_ms=d.get("estimated_time_ms", 0),
+            has_composite=d.get("has_composite", False),
+            confidence=d.get("confidence", 1.0),
+            source="cache",
+        )
     except Exception:
         return None

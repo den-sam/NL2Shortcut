@@ -23,6 +23,8 @@ from typing import Optional, List, Dict, Any
 
 from .llm import _load_api_key, DEEPSEEK_BASE_URL, DEEPSEEK_CHAT_MODEL, REQUEST_TIMEOUT
 from .workflow import WorkflowEngine
+from .context_store import SemanticCache, MinimalContext
+from .model_router import ModelRouter
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Classes
@@ -121,10 +123,18 @@ class WorkflowMatcher:
         self,
         api_key: Optional[str] = None,
         workflows_dir: Optional[Path] = None,
+        shared_cache: Optional[SemanticCache] = None,
+        router: Optional[ModelRouter] = None,
     ):
         self._api_key = api_key or _load_api_key()
         self._available = bool(self._api_key)
         self._last_error: Optional[str] = None
+
+        # 语义缓存：可接受外部共享实例
+        self._cache = shared_cache or SemanticCache()
+
+        # 模型路由：AVR 调度（可选）
+        self._router = router
 
         # WorkflowEngine — 用于列出/加载已有工作流
         self._wf_engine = WorkflowEngine.__new__(WorkflowEngine)
@@ -152,16 +162,38 @@ class WorkflowMatcher:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    def match(self, intent: str) -> MatchResult:
+    def match(self, intent: str, app_name: str = "",
+              ctx: Optional[MinimalContext] = None) -> MatchResult:
         """用 LLM 在已有工作流中找语义最佳匹配。
 
         Args:
             intent: 用户自然语言指令，如 "把代码推上去"
+            app_name: 当前应用名（用于缓存键区分）
 
         Returns:
             MatchResult，matched=True 时 workflow 字段非空。
         """
         start = time.perf_counter()
+
+        # 0. 先查缓存（精确+模糊匹配，带 TTL）
+        cached = self._cache.get(intent, app_name)
+        if cached is not None:
+            elapsed = (time.perf_counter() - start) * 1000
+            cached_result = _restore_match_result(cached)
+            if cached_result is not None:
+                cached_result.elapsed_ms = elapsed
+                return cached_result
+
+        # ── AVR 路由决策（若配置了 router 且有 ctx）──
+        if self._router and ctx:
+            decision = self._router.route(ctx)
+            if not decision.should_call_llm:
+                elapsed = (time.perf_counter() - start) * 1000
+                return MatchResult(
+                    matched=False, candidates=[],
+                    elapsed_ms=elapsed,
+                    error=f"AVR 跳过 LLM: {decision.reason}",
+                )
 
         # 1. 收集所有已有工作流的名称和描述
         candidates = self._collect_candidates()
@@ -193,7 +225,7 @@ class WorkflowMatcher:
                 # 验证 LLM 返回的 name 是否真实存在
                 name = result["name"]
                 if any(c["name"] == name for c in candidates):
-                    return MatchResult(
+                    match_result = MatchResult(
                         matched=True,
                         workflow=MatchedWorkflow(
                             name=name,
@@ -205,21 +237,26 @@ class WorkflowMatcher:
                         candidates=candidates,
                         elapsed_ms=elapsed,
                     )
+                    # 写入缓存
+                    self._cache.set(intent, app_name, match_result.to_dict() if hasattr(match_result, 'to_dict') else _match_to_cache(match_result))
+                    return match_result
                 else:
                     # LLM 编造了名字 → 回退为无匹配
-                    return MatchResult(
+                    no_match = MatchResult(
                         matched=False,
                         candidates=candidates,
                         elapsed_ms=elapsed,
                         error=f"LLM 返回了不存在的工作流名: {name}",
                     )
+                    return no_match
 
-            return MatchResult(
+            no_match = MatchResult(
                 matched=False,
                 candidates=candidates,
                 elapsed_ms=elapsed,
                 error="",
             )
+            return no_match
 
         except Exception as e:
             self._last_error = str(e)
@@ -328,3 +365,43 @@ class WorkflowMatcher:
             raise RuntimeError(f"无法从 LLM 响应中提取 JSON: {content[:100]}")
 
         return json.loads(json_match.group())
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 缓存辅助函数
+# ─────────────────────────────────────────────────────────────────────────
+
+def _match_to_cache(result: MatchResult) -> dict:
+    """将 MatchResult 序列化为可缓存的 dict。"""
+    d = {
+        "matched": result.matched,
+        "candidates": result.candidates,
+        "elapsed_ms": result.elapsed_ms,
+        "error": result.error,
+    }
+    if result.workflow:
+        d["workflow"] = result.workflow.to_dict()
+    return d
+
+
+def _restore_match_result(d: dict) -> Optional[MatchResult]:
+    """从缓存 dict 恢复 MatchResult。"""
+    try:
+        wf = None
+        if d.get("workflow"):
+            wf = MatchedWorkflow(
+                name=d["workflow"].get("name", ""),
+                description=d["workflow"].get("description", ""),
+                confidence=d["workflow"].get("confidence", 0.0),
+                reasoning=d["workflow"].get("reasoning", ""),
+                source_path=d["workflow"].get("source_path", ""),
+            )
+        return MatchResult(
+            matched=d.get("matched", False),
+            workflow=wf,
+            candidates=d.get("candidates", []),
+            elapsed_ms=d.get("elapsed_ms", 0.0),
+            error=d.get("error", ""),
+        )
+    except Exception:
+        return None

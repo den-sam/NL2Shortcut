@@ -20,6 +20,8 @@ from functools import lru_cache
 
 from .models import IntentResult
 from .database import DatabaseManager
+from .context_store import SemanticCache, MinimalContext
+from .model_router import ModelRouter, RoutingDecision
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
@@ -108,7 +110,9 @@ class DeepSeekEngine:
             print(result.command)  # "copy"
     """
 
-    def __init__(self, db: DatabaseManager, api_key: Optional[str] = None):
+    def __init__(self, db: DatabaseManager, api_key: Optional[str] = None,
+                 shared_cache: Optional[SemanticCache] = None,
+                 router: Optional[ModelRouter] = None):
         self._db = db
         self._api_key = api_key or _load_api_key()
         self._available = bool(self._api_key)
@@ -116,9 +120,12 @@ class DeepSeekEngine:
         self._total_calls = 0
         self._total_latency = 0.0
         self._failed_calls = 0
-        self._cache: Dict[str, IntentResult] = {}
-        self._cache_hits = 0
-        self._cache_misses = 0
+
+        # 语义缓存：可接受外部共享实例（来自 ContextStore）
+        self._cache = shared_cache or SemanticCache()
+
+        # 模型路由：AVR 调度（可选）
+        self._router = router
 
         # 一次性构建快捷键列表
         self._shortcut_list: List[Dict[str, str]] = []
@@ -141,8 +148,8 @@ class DeepSeekEngine:
 
     @property
     def cache_stats(self) -> Dict[str, int]:
-        """LLM 缓存命中统计（hits/misses/size）。"""
-        return {"hits": self._cache_hits, "misses": self._cache_misses, "size": len(self._cache)}
+        """LLM 缓存命中统计（hits/misses/size/fuzzy_hits）。"""
+        return self._cache.stats()
 
     def configure(self, api_key: str) -> bool:
         """设置 API Key。设置成功返回 True。"""
@@ -167,8 +174,10 @@ class DeepSeekEngine:
         ]
         self._prompt = _build_system_prompt(self._shortcut_list)
 
-    def recognize(self, text: str) -> Optional[IntentResult]:
+    def recognize(self, text: str, app_name: str = "", ctx: Optional[MinimalContext] = None) -> Optional[IntentResult]:
         """通过 DeepSeek API 识别意图。
+
+        支持 AVR 路由：传入 ctx 且配置了 router 时，自动选最优模型档位。
 
         返回：
             简单匹配：返回带 command 的 IntentResult
@@ -178,16 +187,22 @@ class DeepSeekEngine:
         if not self._available or not text.strip():
             return None
 
-        # ── LLM 结果缓存：相同意图直接命中，零网络延迟 ──
-        cache_key = text.strip().lower()
-        if cache_key in self._cache:
-            self._cache_hits += 1
-            return self._cache[cache_key]
-        self._cache_misses += 1
+        # ── 跨请求语义缓存：精确匹配 + Jaccard 模糊匹配，带 TTL ──
+        cached = self._cache.get(text, app_name)
+        if cached is not None:
+            return cached
+
+        # ── AVR 路由决策：决定用哪个模型 ──
+        model = DEEPSEEK_CHAT_MODEL
+        if self._router and ctx:
+            decision = self._router.route(ctx)
+            if not decision.should_call_llm:
+                return None  # 路由判定无需调 LLM
+            model = decision.model
 
         start = time.perf_counter()
         try:
-            result = self._call_api(text)
+            result = self._call_api(text, model=model)
             elapsed = time.perf_counter() - start
             self._total_calls += 1
             self._total_latency += elapsed
@@ -213,7 +228,7 @@ class DeepSeekEngine:
                         matched_keyword=f"DeepSeek Plan: {result.get('reasoning', '')}",
                         alternatives=plan_alternatives,
                     )
-                    self._cache[cache_key] = parsed
+                    self._cache.set(text, app_name, parsed)
                     return parsed
                 # 简单单步匹配（保持向后兼容）
                 parsed = IntentResult(
@@ -222,7 +237,7 @@ class DeepSeekEngine:
                     confidence=float(result.get("confidence", 0)),
                     matched_keyword=f"DeepSeek: {result.get('reasoning', '')}",
                 )
-                self._cache[cache_key] = parsed
+                self._cache.set(text, app_name, parsed)
                 return parsed
         except Exception as e:
             self._failed_calls += 1
@@ -237,10 +252,11 @@ class DeepSeekEngine:
 
         return None
 
-    def _call_api(self, text: str) -> Optional[Dict[str, Any]]:
-        """向 DeepSeek 发起一次 API 调用。"""
+    def _call_api(self, text: str, model: str = "") -> Optional[Dict[str, Any]]:
+        """向 DeepSeek 发起一次 API 调用。model 为空时用默认 DEEPSEEK_CHAT_MODEL。"""
+        use_model = model or DEEPSEEK_CHAT_MODEL
         payload = json.dumps({
-            "model": DEEPSEEK_CHAT_MODEL,
+            "model": use_model,
             "messages": [
                 {"role": "system", "content": self._prompt},
                 {"role": "user", "content": text},

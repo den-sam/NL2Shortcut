@@ -48,6 +48,47 @@ import time
 from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, Optional, Tuple
 
+# ── 合规闸门 ──────────────────────────────────────────────────────────
+# compliance_mode = False → 默认禁用视觉层（合规要求）
+# compliance_mode = True  → 非合规场景启用（端侧纯视觉模型）
+#
+# 融合策略④"端侧纯视觉 → 合规兜底层"的落点。
+# 所有 vision_*() 函数在 compliance_mode=False 时返回禁用结果。
+# ───────────────────────────────────────────────────────────────────────
+
+_compliance_mode: bool = False
+
+
+def set_compliance_mode(enabled: bool) -> None:
+    """设置合规模式。True 启用视觉层，False 禁用（默认）。"""
+    global _compliance_mode
+    _compliance_mode = enabled
+
+
+def get_compliance_mode() -> bool:
+    """查询当前合规模式。"""
+    return _compliance_mode
+
+
+def _check_compliance() -> Optional[VisionResult]:
+    """合规闸门检查。禁用时返回拒绝结果，启用时返回 None（通过）。"""
+    if not _compliance_mode:
+        return VisionResult(
+            ok=False,
+            action="vision.blocked",
+            tier="vision",
+            platform=_detect_platform(),
+            message=(
+                "Vision tier is disabled by compliance policy. "
+                "Set compliance_mode=True to enable vision fallback. "
+                "This is a safety gate: vision-based automation (screenshot + visual model) "
+                "poses compliance risks in regulated environments."
+            ),
+            duration_ms=0.0,
+            error_code="compliance_disabled",
+        )
+    return None
+
 
 @dataclass
 class VisionResult:
@@ -182,15 +223,13 @@ def vision_screenshot(
 ) -> VisionResult:
     """截图并返回一个视觉层回执。
 
-    Args:
-        intent: 原始的 Agent 意图（用于生成提示）
-        app:    活动应用名称（用于提示上下文）
-        region: 可选的区域 (x, y, w, h)。None 表示全屏。
-        encode_b64: 是否将 PNG 以 base64 编码放入响应中。
-
-    Returns:
-        VisionResult，其 data 字典中包含 image_b64（当 encode_b64=True 时）。
+    compliance_mode=False 时返回合规禁用结果（融合策略④）。
     """
+    # ── 合规闸门 ──
+    blocked = _check_compliance()
+    if blocked is not None:
+        return blocked
+
     t0 = time.time()
     plat = _detect_platform()
     if plat not in ("windows", "macos", "linux"):
@@ -384,17 +423,17 @@ def dispatch_vision(
 ) -> Dict[str, Any]:
     """将截图发送给具备视觉能力的 LLM 并解析其响应。
 
-    Args:
-        intent: 在屏幕上要查找/点击的内容（例如 "the Copy menu item"）
-        screenshot_b64: base64 编码的 PNG 截图
-        model: "deepseek" 或 "claude"
-        api_key: API 密钥（为 None 时自动从配置加载）
-
-    Returns:
-        {"found": bool, "label": str, "bbox": [x,y,w,h]|None,
-         "center": [x,y]|None, "action": "click"|"type"|"unclear",
-         "text": str|None, "confidence": float, "error": str|None}
+    compliance_mode=False 时返回禁用结果。
     """
+    # ── 合规闸门 ──
+    if not _compliance_mode:
+        return {
+            "found": False,
+            "error": "Vision dispatch is disabled by compliance policy.",
+            "label": "", "bbox": None, "center": None,
+            "action": "unclear", "text": None, "confidence": 0.0,
+        }
+
     if model == "deepseek":
         return _dispatch_deepseek_vision(intent, screenshot_b64, api_key)
     elif model == "claude":

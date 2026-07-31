@@ -72,15 +72,12 @@ def recommend_fallback(
     failed_error_code: str,
     command_meta: Optional[Dict[str, Any]],
     fallback_policy: str = "gui_retry",
+    compliance_mode: bool = False,
 ) -> Dict[str, Any]:
     """当某个步骤失败时，建议 Agent 下一步该怎么做。
 
-    Returns: {
-        "tier": "api" | "vision" | "keyboard",
-        "action": "retry" | "escalate_api" | "escalate_vision" | "abort",
-        "target": "<api target or null>",
-        "reason": "...",
-    }
+    Args:
+        compliance_mode: 合规模式。False 时 vision 降级返回 abort。
     """
     api_eq = (command_meta or {}).get("api_equivalent")
     gui_fb = (command_meta or {}).get("gui_fallback")
@@ -95,8 +92,13 @@ def recommend_fallback(
         return {"tier": TIER_API, "action": "escalate_api", "target": api_eq,
                 "reason": f"error '{failed_error_code}' has api_equivalent; try API tier"}
 
-    # 其次：若触发条件匹配，则升级到视觉档
+    # 其次：若触发条件匹配，则升级到视觉档（合规闸门检查）
     if VISION_TRIGGERS.get(failed_error_code, False):
+        if not compliance_mode:
+            return {"tier": TIER_KEYBOARD, "action": "abort",
+                    "target": None,
+                    "reason": f"error '{failed_error_code}' would escalate to vision, "
+                              f"but compliance_mode=False blocks vision escalation"}
         return {"tier": TIER_VISION, "action": "escalate_vision",
                 "target": gui_fb, "reason": f"error '{failed_error_code}' requires visual fallback"}
 
@@ -106,7 +108,11 @@ def recommend_fallback(
         return {"tier": TIER_KEYBOARD, "action": "retry", "target": None,
                 "reason": "transient error; retry the same keyboard action"}
 
-    # 最后手段
+    # 最后手段：合规模式下才允许 vision 降级
+    if not compliance_mode:
+        return {"tier": TIER_KEYBOARD, "action": "abort",
+                "target": None,
+                "reason": "no tier available; compliance_mode blocks vision escalation"}
     return {"tier": TIER_VISION, "action": "escalate_vision",
             "target": gui_fb, "reason": "no other tier available"}
 
@@ -141,7 +147,9 @@ def tier_summary() -> Dict[str, Any]:
                 "reliability": "highest",
                 "description": "GUI vision (CogAgent / OmniParser / Claude Computer Use). "
                                "Last-resort fallback. Slower, costs tokens, but can recover "
-                               "from any UI state. Used when keyboard + api both fail.",
+                               "from any UI state. Used when keyboard + api both fail. "
+                               "Gated by compliance_mode flag (disabled by default).",
+                "compliance_gated": True,
             },
         ],
         "decision_rule": "keyboard first, then api, then vision",
