@@ -1,4 +1,4 @@
-﻿"""nl2shortcut GUI - VS Code Light+ 风格界面
+"""nl2shortcut GUI - VS Code Light+ 风格界面
 
 自然语言 → 快捷键 · 中英文双引擎 · 51 条内置快捷键
 左侧导航栏 (20%) + 右侧内容区 (80%)
@@ -225,6 +225,16 @@ QLineEdit:focus {{
 }}
 QLineEdit::placeholder {{
     color: {CL_TEXT_MUTED};
+}}
+
+/* 导航栏搜索框 — 点击/聚焦时不显示边框 */
+#searchInput {{
+    border: 1px solid {CL_BORDER};
+    border-radius: 4px;
+}}
+#searchInput:focus {{
+    border: 1px solid {CL_BORDER};
+    padding: 8px 12px;
 }}
 
 /* 主输入区（多行 QTextEdit，完全融入卡片，无任何边框） */
@@ -969,6 +979,7 @@ class ShortcutsPanel(QWidget):
         # 工具栏
         toolbar = QHBoxLayout()
         self._search = QLineEdit()
+        self._search.setObjectName("searchInput")
         self._search.setPlaceholderText("搜索快捷键...(命令 / 描述 / 按键)")
         self._search.setMinimumHeight(36)
         toolbar.addWidget(self._search, stretch=2)
