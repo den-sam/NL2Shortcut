@@ -1,4 +1,4 @@
-﻿"""nl2shortcut main agent class."""
+"""nl2shortcut main agent class."""
 
 import time
 import sys
@@ -30,6 +30,70 @@ class ShortcutAgent:
         # Dry run (shows keys without pressing)
         result = agent.execute("save file", dry_run=True)
     """
+
+    # ── 替代快捷键库 ──
+    # 同一命令可能有多种按键组合。当主快捷键验证失败时，
+    # 按顺序尝试替代组合，最多重试 3 次（含首次）。
+    _ALTERNATIVE_KEYS: dict = {
+        # 系统级操作
+        "ms_win_e":        ["Win+E"],
+        "ms_win_e_2":      ["Win+E"],
+        "open_explorer":   ["Win+E"],
+        "ms_win_r":        ["Win+R"],
+        "run_dialog":      ["Win+R"],
+        "ms_win_l":        ["Win+L"],
+        "lock_screen":     ["Win+L"],
+        "ms_win_d":        ["Win+D"],
+        "minimize":        ["Win+D"],
+        "ms_win_tab":      ["Win+Tab"],
+        "task_view":       ["Win+Tab"],
+        # 编辑操作 — 替代键
+        "copy":            ["Ctrl+C", "Ctrl+Insert"],
+        "cut":             ["Ctrl+X", "Shift+Delete"],
+        "paste":           ["Ctrl+V", "Shift+Insert"],
+        "undo":            ["Ctrl+Z", "Alt+Backspace"],
+        "redo":            ["Ctrl+Y", "Ctrl+Shift+Z"],
+        "select_all":      ["Ctrl+A"],
+        "find":            ["Ctrl+F", "F3"],
+        "save":            ["Ctrl+S"],
+        "open":            ["Ctrl+O"],
+        "close":           ["Ctrl+W", "Ctrl+F4"],
+        "new_file":        ["Ctrl+N"],
+        "print":           ["Ctrl+P"],
+        "save_as":         ["Ctrl+Shift+S"],
+        "switch_app":      ["Alt+Tab", "Win+Tab"],
+        "switch_tab":      ["Ctrl+Tab"],
+        "refresh":         ["F5", "Ctrl+R"],
+        "task_manager":    ["Ctrl+Shift+Esc"],
+        "screenshot":      ["Win+Shift+S"],
+        "command_palette": ["Ctrl+Shift+P"],
+        "go_to_line":      ["Ctrl+G"],
+        "rename":          ["F2"],
+        "comment":         ["Ctrl+/"],
+        "bold":            ["Ctrl+B"],
+        "italic":          ["Ctrl+I"],
+        "underline":       ["Ctrl+U"],
+        "zoom_in":         ["Ctrl+Plus"],
+        "zoom_out":        ["Ctrl+Minus"],
+        "zoom_reset":      ["Ctrl+0"],
+        "fullscreen":      ["F11"],
+        "delete":          ["Delete"],
+    }
+
+    # 验证等待时间（毫秒）：注入后等待系统响应
+    # 系统级操作（打开窗口/对话框）需要更长加载时间
+    _VERIFY_DELAY_MS = 300
+    _VERIFY_DELAY_SYSTEM_MS = 800  # Win+E/Win+R 等系统操作
+
+    # 需要更长验证延迟的命令
+    _SYSTEM_COMMANDS = frozenset({
+        "ms_win_e", "ms_win_e_2", "open_explorer",
+        "ms_win_r", "run_dialog",
+        "ms_win_l", "lock_screen",
+        "ms_win_d", "minimize",
+        "ms_win_tab", "task_view",
+        "task_manager", "screenshot",
+    })
 
     def __init__(
         self,
@@ -566,27 +630,84 @@ class ShortcutAgent:
             self._logger.log_execution(result)
             return result
 
-        # Step 3: Execute or dry-run
+        # Step 3: 执行快捷键（带验证 + 重试，最多 3 次）
         # 复制/剪切前缀：在资源管理器等列表场景，需先用 Space 勾选/选中
-        # 高亮项，再发送 Ctrl+C / Ctrl+X，否则会复制空内容或焦点所在文本。
         _SPACE_FIRST = ("copy", "cut")
         needs_space = intent_result.command in _SPACE_FIRST
 
+        # ── 构建候选按键列表 ──
+        # 主键位 + 替代键位（去重），最多尝试 3 次
+        candidates = [key_combination]
+        alt_keys = self._ALTERNATIVE_KEYS.get(intent_result.command, [])
+        for alt in alt_keys:
+            if alt not in candidates:
+                candidates.append(alt)
+        candidates = candidates[:3]  # 最多 3 次尝试
+
         error = None
-        if not dry_run:
-            try:
-                if needs_space and self.adapter:
-                    self.adapter.send_keys("Space")
-                self.adapter.send_keys(key_combination)
-                self._db.increment_frequency(intent_result.command)
-            except Exception as e:
-                error = str(e)
+        verified = False
+        used_key = key_combination
+        attempt = 0
+
+        if dry_run:
+            # dry_run 模式：不执行，不验证
+            error = None
+            verified = True
+            used_key = candidates[0]
+        else:
+            from .selfcheck import snapshot as _sc_snapshot, verify as _sc_verify
+
+            # 系统级操作需要更长验证延迟
+            verify_delay = (self._VERIFY_DELAY_SYSTEM_MS
+                            if intent_result.command in self._SYSTEM_COMMANDS
+                            else self._VERIFY_DELAY_MS)
+
+            for attempt, try_key in enumerate(candidates):
+                error = None
+                try:
+                    # 注入前快照
+                    snap_before = _sc_snapshot(
+                        intent_result.command, app_name="")
+
+                    # 执行按键
+                    if needs_space and self.adapter:
+                        self.adapter.send_keys("Space")
+                    self.adapter.send_keys(try_key)
+                    self._db.increment_frequency(intent_result.command)
+
+                    # 注入后验证
+                    check_result = _sc_verify(
+                        intent_result.command, snap_before,
+                        delay_ms=verify_delay, app_name="")
+
+                    check_ok = check_result.get("ok")
+                    if check_ok is None:
+                        # noop（无可观察信号）→ 视为成功
+                        verified = True
+                        used_key = try_key
+                        break
+                    elif check_ok is True:
+                        # 验证通过
+                        verified = True
+                        used_key = try_key
+                        break
+                    else:
+                        # 验证失败 → 尝试下一个候选键
+                        error = (f"self-check failed (attempt {attempt+1}/{len(candidates)}): "
+                                 f"{check_result.get('message', 'unknown')}")
+                        continue
+                except Exception as e:
+                    error = f"execution error (attempt {attempt+1}): {e}"
+                    continue
+
+            if not verified and error is None:
+                error = "all key combinations exhausted without verification"
 
         elapsed = time.perf_counter() - start
         # 展示用键位：复制/剪切时显式标出前置的 Space 勾选
-        display_key = f"Space → {key_combination}" if needs_space else key_combination
+        display_key = f"Space → {used_key}" if needs_space else used_key
         result = ExecutionResult(
-            success=error is None,
+            success=verified and error is None,
             intent=intent_result.intent,
             confidence=intent_result.confidence,
             command=intent_result.command,

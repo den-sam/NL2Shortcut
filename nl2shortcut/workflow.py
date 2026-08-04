@@ -68,24 +68,49 @@ class WorkflowEngine:
         return dirs
 
     def list_workflows(self) -> list:
-        """列出所有可用的工作流名称（合并本地与全局目录）。"""
+        """列出所有可用的工作流（文件名 stem）。"""
         names = set()
         for d in self._all_dirs():
             for p in d.glob("*.yaml"):
                 names.add(p.stem)
+            for p in d.glob("*.yml"):
+                names.add(p.stem)
         return list(names)
 
-    def load(self, name: str) -> Optional[WorkflowDefinition]:
-        """按名称加载工作流（不含 .yaml 扩展名）。优先从本地目录加载。"""
-        path = None
+    def _resolve_path(self, name: str) -> Optional[Path]:
+        """按 name 解析工作流文件路径。
+
+        查找顺序：
+          1. 直接按文件名（不含扩展名）匹配 .yaml / .yml
+          2. 扫描所有工作流，匹配 YAML 内部的 ``name:`` 字段（显示名/中文名）
+        返回命中的路径，找不到返回 None。
+        """
+        # 1) 文件名优先
         for d in self._all_dirs():
             for ext in (".yaml", ".yml"):
                 p = d / f"{name}{ext}"
                 if p.exists():
-                    path = p
-                    break
-            if path:
-                break
+                    return p
+
+        # 2) 回退：按内部 name: 字段匹配
+        for d in self._all_dirs():
+            for p in sorted(d.glob("*.yaml")) + sorted(d.glob("*.yml")):
+                try:
+                    with open(p, "r", encoding="utf-8-sig") as f:
+                        raw = yaml.safe_load(f)
+                    if raw and raw.get("name") == name:
+                        return p
+                except Exception:
+                    continue
+        return None
+
+    def load(self, name: str) -> Optional[WorkflowDefinition]:
+        """按名称加载工作流。
+
+        ``name`` 可以是文件名（不含 .yaml/.yml），也可以是 YAML 内部的
+        ``name:`` 字段（如中文显示名）。优先从本地目录加载。
+        """
+        path = self._resolve_path(name)
         if path is None:
             return None
 

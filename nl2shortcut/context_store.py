@@ -68,6 +68,9 @@ class MinimalContext:
     risk: float = 0.0                   # [0.0, 1.0] 执行风险
     token_budget: int = 0              # 预估所需 token 数（0 = 无需 LLM）
 
+    # ── 缓存命中时的有效载荷（跳过 agent.execute() 的关键）──
+    cached_result: Any = None           # 命中的缓存值（dict，含 key_combination）
+
     # ── 元数据 ──
     cache_hit: bool = False            # 是否命中缓存
     workflow_hit: bool = False         # 是否命中工作流
@@ -83,6 +86,7 @@ class MinimalContext:
             "risk": self.risk,
             "token_budget": self.token_budget,
             "cache_hit": self.cache_hit,
+            "has_cached_result": self.cached_result is not None,
             "workflow_hit": self.workflow_hit,
             "recent_count": len(self.recent_actions),
             "workflows_count": len(self.available_workflows),
@@ -129,12 +133,14 @@ class SemanticCache:
         fuzzy_threshold: float = 0.6,  # Jaccard 阈值
         max_entries: int = 500,        # 最大缓存条目
         persist_path: Optional[str] = None,
+        persist_debounce_s: float = 2.0,  # 异步批量持久化去抖间隔
     ):
         self._exact_ttl = exact_ttl_s
         self._fuzzy_ttl = fuzzy_ttl_s
         self._fuzzy_threshold = fuzzy_threshold
         self._max_entries = max_entries
         self._persist_path = Path(persist_path) if persist_path else None
+        self._persist_debounce_s = persist_debounce_s
 
         # 内部存储: exact_key -> (value, expiry_ts, intent, app_name)
         self._store: Dict[str, Tuple[Any, float, str, str]] = {}
@@ -144,6 +150,11 @@ class SemanticCache:
         self._hits: int = 0
         self._misses: int = 0
         self._fuzzy_hits: int = 0
+
+        # 异步批量持久化：原实现每次 set 都同步写盘 5-50ms，
+        # 改为 Timer 去抖：set 后不立即写盘，等 _persist_debounce_s 内无新写入再批量写
+        self._persist_timer: Optional[threading.Timer] = None
+        self._persist_dirty: bool = False
 
         # 从磁盘恢复
         if self._persist_path and self._persist_path.exists():
@@ -204,13 +215,51 @@ class SemanticCache:
                 del self._store[oldest_key]
 
             self._store[key] = (value, now + self._exact_ttl, intent, app_name)
+            self._persist_dirty = True
 
-        # 异步持久化（简化：写完后同步写磁盘）
-        if self._persist_path:
-            try:
-                self._save_to_disk()
-            except Exception:
-                pass
+        # 异步去抖持久化：不立即写盘，等 _persist_debounce_s 内无新写入再批量写
+        # 原实现每次 set 都同步写盘 5-50ms，改后平均分摊到 ~0ms
+        self._schedule_persist()
+
+    def _schedule_persist(self) -> None:
+        """去抖调度异步持久化。
+
+        若已有挂起的 Timer，先取消；再启一个新的，等 _persist_debounce_s 秒后写盘。
+        连续高频 set 时只会触发一次写盘。
+        """
+        if not self._persist_path:
+            return
+        with self._lock:
+            if self._persist_timer is not None:
+                self._persist_timer.cancel()
+            t = threading.Timer(self._persist_debounce_s, self._async_persist)
+            t.daemon = True
+            self._persist_timer = t
+            t.start()
+
+    def _async_persist(self) -> None:
+        """Timer 回调：在后台线程执行批量持久化。"""
+        try:
+            self._save_to_disk()
+        except Exception:
+            pass
+        with self._lock:
+            self._persist_timer = None
+
+    def flush(self) -> None:
+        """立即把待写的缓存同步到磁盘（用于优雅关闭）。"""
+        with self._lock:
+            if self._persist_timer is not None:
+                self._persist_timer.cancel()
+                self._persist_timer = None
+            if not self._persist_dirty:
+                return
+        try:
+            self._save_to_disk()
+            with self._lock:
+                self._persist_dirty = False
+        except Exception:
+            pass
 
     def stats(self) -> Dict[str, int]:
         """缓存统计信息。"""
@@ -387,43 +436,96 @@ class ContextStore:
         clipboard_text: str = "",
         selected_text: str = "",
         open_apps: Optional[List[str]] = None,
+        ui_state: Any = None,
     ) -> MinimalContext:
         """从感知层 + 记忆层压缩出"最小可执行上下文"。
 
         Args:
-            app_context: AppContext 来自 context.py::detect_context()
+            app_context: AppContext 或 UIState（来自 context.py 或 perception.py）
             intent: 用户原始自然语言意图
             clipboard_text: 剪贴板文本（若有）
             selected_text: 当前选中文本（若有）
             open_apps: 当前打开的应用列表
+            ui_state: 感知层 UIState（优先于 app_context，包含 UIA 树/截图信息）
 
         Returns:
             MinimalContext 供路由层使用。
         """
         t0 = time.perf_counter()
 
-        app_name = getattr(app_context, "app_name", "") if app_context else ""
-        window_title = getattr(app_context, "window_title", "") if app_context else ""
-        process_name = getattr(app_context, "process_name", "") if app_context else ""
+        # ── 解析 UIState vs AppContext ──
+        # 若传入的是 UIState（有 source 属性），则提取更丰富的信息
+        if ui_state is not None:
+            source = getattr(ui_state, "source", "light")
+            app_name = getattr(ui_state, "app_name", "") or ""
+            window_title = getattr(ui_state, "window_title", "") or ""
+            process_name = getattr(ui_state, "process_name", "") or ""
+            clipboard_text = getattr(ui_state, "clipboard_text", "") or clipboard_text
+            selected_text = getattr(ui_state, "selected_text", "") or selected_text
+            node_count = getattr(ui_state, "node_count", 0)
+            focus = getattr(ui_state, "focus", None)
+            visible_text = getattr(ui_state, "visible_text", "") or ""
+        elif app_context is not None:
+            source = getattr(app_context, "source", "light")
+            app_name = getattr(app_context, "app_name", "") or ""
+            window_title = getattr(app_context, "window_title", "") or ""
+            process_name = getattr(app_context, "process_name", "") or ""
+            clipboard_text = getattr(app_context, "clipboard_text", "") or clipboard_text
+            selected_text = getattr(app_context, "selected_text", "") or selected_text
+            node_count = getattr(app_context, "node_count", 0)
+            focus = getattr(app_context, "focus", None)
+            visible_text = getattr(app_context, "visible_text", "") or ""
+        else:
+            source = "none"
+            app_name = ""
+            window_title = ""
+            process_name = ""
+            node_count = 0
+            focus = None
+            visible_text = ""
 
-        # 缓存命中检测
+        # ── 缓存命中检测 ──
         cache_hit = False
         cached_value = None
         if intent:
             cached_value = self.cache.get(intent, app_name)
             cache_hit = cached_value is not None
 
-        # 工作流命中检测
+        # ── 工作流命中检测 ──
         workflow_hit = False
-        # （由 WorkflowMatcher 在实际匹配阶段填充）
+        if not cache_hit and self._workflow_names:
+            # 快速关键词匹配（启发式前置，避免 LLM 调用）
+            for wf_name in self._workflow_names:
+                # 简单子串匹配（无需 LLM）
+                if wf_name.lower() in intent.lower() or any(
+                    kw in intent.lower() for kw in wf_name.lower().split("_")
+                ):
+                    workflow_hit = True
+                    break
 
-        # 复杂度评估（启发式）
+        # ── 复杂度评估（融合 UI 树信息）──
         complexity = _estimate_complexity(intent)
 
-        # 风险评估
+        # 若有 UIA 树且节点数多 → 复杂 UI → 略增 complexity
+        if node_count > 50 and source == "uia":
+            complexity = min(complexity + 0.08, 1.0)
+
+        # 若焦点在文本框 → 可能涉及编辑操作
+        if focus and hasattr(focus, "role"):
+            focus_role = getattr(focus, "role", "")
+            if focus_role in ("textbox", "edit"):
+                complexity = max(complexity, 0.05)
+
+        # ── 风险评估 ──
         risk = _estimate_risk(intent, app_name)
 
-        # Token 预算估算（缓存命中 → 0）
+        # 若有可见文本提及敏感/系统级词汇 → 略增风险
+        if visible_text:
+            risk_words = ["删除", "确认", "格式化", "卸载", "覆盖", "delete", "confirm"]
+            if any(w in visible_text.lower() for w in risk_words):
+                risk = min(risk + 0.1, 1.0)
+
+        # ── Token 预算估算 ──
         token_budget = 0 if cache_hit or workflow_hit else _estimate_tokens(intent)
 
         elapsed = (time.perf_counter() - t0) * 1000
@@ -441,6 +543,7 @@ class ContextStore:
             complexity=complexity,
             risk=risk,
             token_budget=token_budget,
+            cached_result=cached_value,
             cache_hit=cache_hit,
             workflow_hit=workflow_hit,
             build_elapsed_ms=elapsed,

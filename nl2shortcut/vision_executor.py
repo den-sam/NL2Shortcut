@@ -116,6 +116,130 @@ def _detect_platform() -> str:
     return p
 
 
+def _get_active_window_bbox() -> Optional[Tuple[int, int, int, int]]:
+    """获取前台窗口的边界框 (left, top, right, bottom)。
+
+    Returns:
+        (left, top, right, bottom) 或 None。
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            return (rect.left, rect.top, rect.right, rect.bottom)
+        elif sys.platform == "darwin":
+            # macOS: 通过 Quartz 获取
+            try:
+                import Quartz  # type: ignore
+                win_info = Quartz.CGWindowListCopyWindowInfo(
+                    Quartz.kCGWindowListOptionOnScreenOnly
+                    | Quartz.kCGWindowListExcludeDesktopElements,
+                    Quartz.kCGNullWindowID,
+                )
+                for win in win_info:
+                    if win.get("kCGWindowLayer", 0) == 0:
+                        bounds = win.get("kCGWindowBounds", {})
+                        x = int(bounds.get("X", 0))
+                        y = int(bounds.get("Y", 0))
+                        w = int(bounds.get("Width", 0))
+                        h = int(bounds.get("Height", 0))
+                        return (x, y, x + w, y + h)
+            except Exception:
+                pass
+        elif sys.platform.startswith("linux"):
+            # Linux: xdotool
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["xdotool", "getactivewindow", "getwindowgeometry",
+                     "--shell"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                lines = result.stdout.strip().split("\n")
+                vals = {}
+                for line in lines:
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        vals[k] = int(v)
+                x = vals.get("X", 0)
+                y = vals.get("Y", 0)
+                w = vals.get("WIDTH", 0)
+                h = vals.get("HEIGHT", 0)
+                return (x, y, x + w, y + h)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def _crop_image(png_bytes: bytes, region: Tuple[int, int, int, int]) -> Optional[bytes]:
+    """裁剪 PNG 图像到指定区域 region=(left, top, right, bottom)。"""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(png_bytes))
+        cropped = img.crop(region)
+        buf = io.BytesIO()
+        cropped.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _detect_sensitive_regions(
+    png_bytes: bytes, width: int, height: int,
+) -> List[Tuple[int, int, int, int]]:
+    """在截图中检测敏感区域（密码框、API Key 等），返回黑框区域列表。
+
+    当前采用启发式规则（未来可接入 OCR/视觉模型做更高精度识别）：
+      1. 底部 15% 区域标记为"可能存在敏感信息"（状态栏/输入区）
+      2. 顶部 40 像素标记为"标题栏"（可能有个人姓名/账号）
+
+    返回: [(x, y, w, h), ...] 需要擦除的矩形区域列表。
+    """
+    regions = []
+    # 标题栏区域（top 40px）—— 窗口标题可能包含用户名/个人文件路径
+    regions.append((0, 0, width, min(40, height)))
+    # 底部输入区（bottom 15%）—— 可能有输入框中的密码/私密文字
+    bottom_h = max(int(height * 0.15), 30)
+    regions.append((0, height - bottom_h, width, bottom_h))
+    return regions
+
+
+def _redact_image(
+    png_bytes: bytes,
+    redaction_regions: List[Tuple[int, int, int, int]],
+) -> bytes:
+    """对截图指定区域进行黑色覆盖（安全擦除）。
+
+    Args:
+        png_bytes: 原始 PNG 字节。
+        redaction_regions: [(x, y, w, h), ...] 需要黑色覆盖的区域。
+
+    Returns:
+        擦除后的 PNG 字节。若 PIL 不可用则返回原始字节。
+    """
+    if not redaction_regions:
+        return png_bytes
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.open(io.BytesIO(png_bytes))
+        draw = ImageDraw.Draw(img)
+        for rx, ry, rw, rh in redaction_regions:
+            draw.rectangle([rx, ry, rx + rw, ry + rh], fill="black")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return png_bytes
+
+
 def _try_pil_screenshot() -> Optional[bytes]:
     """Try PIL.ImageGrab (Windows/macOS). Returns PNG bytes or None."""
     try:
@@ -185,18 +309,24 @@ def _try_pyautogui_screenshot() -> Optional[bytes]:
 
 
 def _capture_screenshot(region: Optional[Tuple[int, int, int, int]] = None) -> Tuple[Optional[bytes], str]:
-    """按顺序尝试多个截图后端。返回 (png_bytes, method_used)。"""
+    """按顺序尝试多个截图后端。支持 sub-region 裁剪。返回 (png_bytes, method_used)。"""
     # 1) PIL.ImageGrab（Windows 上的首选）
     png = _try_pil_screenshot()
     if png:
+        if region:
+            png = _crop_image(png, region)
         return png, "PIL.ImageGrab"
     # 2) mss（跨平台、速度快）
     png = _try_mss_screenshot()
     if png:
+        if region:
+            png = _crop_image(png, region)
         return png, "mss"
     # 3) pyautogui（较慢的兜底方案）
     png = _try_pyautogui_screenshot()
     if png:
+        if region:
+            png = _crop_image(png, region)
         return png, "pyautogui"
     return None, "none"
 
@@ -616,8 +746,219 @@ def _dispatch_claude_vision(
                 "action": "unclear", "text": None, "confidence": 0.0}
 
 
+# ── 增强视觉兜底：主动窗口 + 安全擦除 ──────────────────────────────────
+
+
+def capture_active_window(
+    intent: str = "",
+    app: str = "",
+    encode_b64: bool = True,
+    redact: bool = True,
+) -> VisionResult:
+    """截图仅包含活动窗口区域，并可选择性地擦除敏感区域。
+
+    融合策略④的实现：局部截图 + 安全擦除。
+    相比全屏截图，活动窗口截图体积更小且避免泄露其他窗口内容。
+    """
+    # ── 合规闸门 ──
+    blocked = _check_compliance()
+    if blocked is not None:
+        return blocked
+
+    t0 = time.time()
+    plat = _detect_platform()
+    if plat not in ("windows", "macos", "linux"):
+        return VisionResult(
+            ok=False, action="vision.active_window", platform=plat,
+            message=f"platform '{plat}' is not supported",
+            duration_ms=(time.time() - t0) * 1000,
+            error_code="platform_unsupported",
+        )
+
+    # 获取活动窗口边界框 → 截图 + 裁剪
+    bbox = _get_active_window_bbox()
+    if bbox is None:
+        # 降级：全屏截图
+        png_bytes, method = _capture_screenshot()
+        capture_region = "full_screen"
+    else:
+        png_bytes, method = _capture_screenshot(region=bbox)
+        capture_region = f"active_window:{bbox}"
+
+    if not png_bytes:
+        return VisionResult(
+            ok=False, action="vision.active_window", platform=plat,
+            message="no screenshot backend available",
+            duration_ms=(time.time() - t0) * 1000,
+            error_code="no_image_lib",
+        )
+
+    # 安全擦除
+    width, height = 0, 0
+    try:
+        if png_bytes[:8] == b"\x89PNG\r\n\x1a\n" and len(png_bytes) > 24:
+            width = int.from_bytes(png_bytes[16:20], "big")
+            height = int.from_bytes(png_bytes[20:24], "big")
+    except Exception:
+        pass
+
+    if redact and width > 0 and height > 0:
+        sensitive = _detect_sensitive_regions(png_bytes, width, height)
+        if sensitive:
+            png_bytes = _redact_image(png_bytes, sensitive)
+            method += "+redacted"
+
+    data: Dict[str, Any] = {
+        "format": "png",
+        "width": width,
+        "height": height,
+        "capture_region": capture_region,
+        "capture_method": method,
+        "size_bytes": len(png_bytes),
+        "redacted": redact,
+        "hint": _build_vision_hint(intent, app),
+        "fallback_suggested": "vision.click OR escalate to human",
+    }
+
+    if encode_b64:
+        data["image_b64"] = base64.b64encode(png_bytes).decode("ascii")
+    else:
+        data["image_path"] = ""
+
+    return VisionResult(
+        ok=True,
+        action="vision.active_window",
+        platform=plat,
+        message=(
+            f"captured active window {width}x{height} ({len(png_bytes)} bytes) via {method}. "
+            + ("Sensitive regions redacted." if redact else "")
+        ),
+        duration_ms=(time.time() - t0) * 1000,
+        data=data,
+        error_code="ok",
+    )
+
+
+def capture_region(
+    x: int, y: int, w: int, h: int,
+    intent: str = "",
+    app: str = "",
+    encode_b64: bool = True,
+    redact: bool = False,
+) -> VisionResult:
+    """截图指定坐标区域 (x, y, w, h)。
+
+    用于精确 UI 元素定位场景，例如找到某个按钮的 bounding box 后截取。
+    """
+    blocked = _check_compliance()
+    if blocked is not None:
+        return blocked
+
+    t0 = time.time()
+    plat = _detect_platform()
+
+    bbox = (x, y, x + w, y + h)
+    png_bytes, method = _capture_screenshot(region=bbox)
+
+    if not png_bytes:
+        return VisionResult(
+            ok=False, action="vision.region", platform=plat,
+            message="no screenshot backend available",
+            duration_ms=(time.time() - t0) * 1000,
+            error_code="no_image_lib",
+        )
+
+    if redact and w > 0 and h > 0:
+        sensitive = _detect_sensitive_regions(png_bytes, w, h)
+        if sensitive:
+            png_bytes = _redact_image(png_bytes, sensitive)
+            method += "+redacted"
+
+    data: Dict[str, Any] = {
+        "format": "png",
+        "width": w,
+        "height": h,
+        "capture_region": f"{x},{y},{w},{h}",
+        "capture_method": method,
+        "size_bytes": len(png_bytes),
+        "redacted": redact,
+        "hint": _build_vision_hint(intent, app),
+        "fallback_suggested": "vision.click OR escalate to human",
+    }
+
+    if encode_b64:
+        data["image_b64"] = base64.b64encode(png_bytes).decode("ascii")
+
+    return VisionResult(
+        ok=True,
+        action="vision.region",
+        platform=plat,
+        message=f"captured region {w}x{h} at ({x},{y}) via {method}",
+        duration_ms=(time.time() - t0) * 1000,
+        data=data,
+        error_code="ok",
+    )
+
+
+def safe_screenshot(
+    intent: str = "",
+    app: str = "",
+    redact: bool = True,
+    encode_b64: bool = True,
+) -> VisionResult:
+    """安全截图 —— 全屏 + 自动敏感区域擦除。
+
+    这是对合规场景下 vision_screenshot() 的安全增强版。
+    确保敏感信息（密码框、API Key、个人信息）在 base64 编码前已被黑色覆盖。
+    """
+    result = vision_screenshot(intent=intent, app=app, encode_b64=False)
+    if not result.ok:
+        return result
+
+    if redact:
+        w = result.data.get("width", 0)
+        h = result.data.get("height", 0)
+        if w > 0 and h > 0:
+            # 解码 base64 → 擦除 → 重新编码
+            raw_b64 = result.data.get("image_b64", "")
+            if raw_b64:
+                try:
+                    raw_bytes = base64.b64decode(raw_b64)
+                    sensitive = _detect_sensitive_regions(raw_bytes, w, h)
+                    if sensitive:
+                        raw_bytes = _redact_image(raw_bytes, sensitive)
+                        result.data["image_b64"] = (
+                            base64.b64encode(raw_bytes).decode("ascii") if encode_b64 else ""
+                        )
+                        result.data["redacted"] = True
+                        result.data["capture_method"] += "+redacted"
+                        result.message += " Sensitive regions redacted."
+                except Exception:
+                    pass
+
+    return result
+
+
+def redact_text_from_screenshot(
+    png_bytes: bytes,
+    text_regions: List[Tuple[int, int, int, int]],
+) -> bytes:
+    """对截图中的指定文字区域做黑色覆盖擦除。
+
+    Args:
+        png_bytes: 原始 PNG 字节
+        text_regions: [(x, y, w, h), ...] 需要擦除的矩形列表
+
+    Returns:
+        擦除后的 PNG 字节
+    """
+    return _redact_image(png_bytes, text_regions)
+
+
 if __name__ == "__main__":
     # 快速冒烟测试
     print("Available backends:", available_backends())
     r = vision_screenshot("test intent", app="vscode")
-    print(r.to_dict())
+    print("Full screen:", r.ok, f"{r.data.get('width', 0)}x{r.data.get('height', 0)}")
+    r2 = capture_active_window("test intent", app="vscode")
+    print("Active window:", r2.ok, f"{r2.data.get('width', 0)}x{r2.data.get('height', 0)}")

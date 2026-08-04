@@ -14,6 +14,7 @@ WorkflowMatcher
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -85,7 +86,7 @@ _MATCHER_SYSTEM_PROMPT = """\
 有匹配时：
 {
   "matched": true,
-  "name": "工作流文件名（不含 .yaml 扩展名）",
+  "name": "工作流标识（候选列表中某个 name 或 display_name，二选一即可）",
   "confidence": 0.85,
   "reasoning": "为什么选这个（1句话）"
 }
@@ -98,7 +99,10 @@ _MATCHER_SYSTEM_PROMPT = """\
 
 **重要**：
 - 只输出 JSON，不要任何其他文字。
-- name 必须是候选列表中 EXISTS 的那个名字，不要编造。
+- name 必须是候选列表中 EXISTS 的标识：可以用 ``name``（文件名），
+  也可以用 ``display_name``（工作流的中文/显示名）；二者等价，不要编造。
+- 用户可能用工作流的「中文显示名」来指代它（例如用户说"Git 提交并推送"，
+  而候选里 display_name 正是 "Git 提交并推送"），此时应返回该 display_name。
 - 如果用户的意图虽然与某个 worklows 名称相近但描述完全无关，不要强行匹配。
 """
 
@@ -143,6 +147,13 @@ class WorkflowMatcher:
         )
         self._wf_engine._workflows_dir.mkdir(parents=True, exist_ok=True)
         self._wf_engine._local_dir = Path.cwd() / ".nl2shortcut" / "workflows"
+
+        # 候选列表内存缓存 + mtime 失效判断
+        # 原实现每次 match() 都 glob + load 所有 YAML，每个 yaml.safe_load ~1-5ms
+        # 改为缓存 candidates 列表 + 记录每个文件的 mtime，仅当文件变化时重新加载
+        self._candidates_cache: List[Dict[str, str]] = []
+        self._candidates_sig: Dict[str, float] = {}  # path -> mtime
+        self._candidates_dirty: bool = True
 
     @property
     def available(self) -> bool:
@@ -206,6 +217,49 @@ class WorkflowMatcher:
                 error="" if self._api_key else "LLM API Key 未配置",
             )
 
+        # 1.5 快速文件名预匹配（免 LLM）
+        # 当用户意图直接匹配工作流文件名（或去掉 -ok/-failed 后缀后匹配）时，
+        # 跳过 LLM 直接返回，降低延迟。
+        intent_lower = intent.strip().lower()
+        for c in candidates:
+            wf_name = c["name"]  # 文件名（不含扩展名）
+            # 去掉常见后缀：-ok, -failed, -success
+            stripped = wf_name
+            for suffix in ("-ok", "-failed", "-success", "-ok", " ok", " failed"):
+                if stripped.lower().endswith(suffix):
+                    stripped = stripped[: -len(suffix)]
+                    break
+            # 精确匹配（忽略大小写）
+            if intent_lower == wf_name.lower() or intent_lower == stripped.lower():
+                elapsed = (time.perf_counter() - start) * 1000
+                return MatchResult(
+                    matched=True,
+                    workflow=MatchedWorkflow(
+                        name=wf_name,
+                        description=c.get("description", ""),
+                        confidence=0.95,
+                        reasoning="文件名精确匹配",
+                        source_path=c.get("source_path", ""),
+                    ),
+                    candidates=candidates,
+                    elapsed_ms=elapsed,
+                )
+            # 意图包含完整工作流名（"帮我打开终端" 包含 "打开终端"）
+            if len(stripped) >= 3 and stripped.lower() in intent_lower:
+                elapsed = (time.perf_counter() - start) * 1000
+                return MatchResult(
+                    matched=True,
+                    workflow=MatchedWorkflow(
+                        name=wf_name,
+                        description=c.get("description", ""),
+                        confidence=0.88,
+                        reasoning="意图包含工作流名",
+                        source_path=c.get("source_path", ""),
+                    ),
+                    candidates=candidates,
+                    elapsed_ms=elapsed,
+                )
+
         # 2. 如果没有 API Key，无法做语义匹配，直接返回无匹配
         if not self._available:
             elapsed = (time.perf_counter() - start) * 1000
@@ -222,9 +276,16 @@ class WorkflowMatcher:
             elapsed = (time.perf_counter() - start) * 1000
 
             if result.get("matched") and result.get("name"):
-                # 验证 LLM 返回的 name 是否真实存在
-                name = result["name"]
-                if any(c["name"] == name for c in candidates):
+                # 验证 LLM 返回的 name 是否真实存在（可能是文件名或显示名）
+                raw_name = result["name"]
+                hit = None
+                for c in candidates:
+                    if c["name"] == raw_name or c["display_name"] == raw_name:
+                        hit = c
+                        break
+                if hit:
+                    # 统一用文件名作为规范 name（load/run 两者都支持）
+                    name = hit["name"]
                     match_result = MatchResult(
                         matched=True,
                         workflow=MatchedWorkflow(
@@ -232,7 +293,7 @@ class WorkflowMatcher:
                             description=self._get_description(name, candidates),
                             confidence=float(result.get("confidence", 0.7)),
                             reasoning=result.get("reasoning", ""),
-                            source_path=result.get("source_path", ""),
+                            source_path=result.get("source_path", "") or hit.get("source_path", ""),
                         ),
                         candidates=candidates,
                         elapsed_ms=elapsed,
@@ -246,7 +307,7 @@ class WorkflowMatcher:
                         matched=False,
                         candidates=candidates,
                         elapsed_ms=elapsed,
-                        error=f"LLM 返回了不存在的工作流名: {name}",
+                        error=f"LLM 返回了不存在的工作流名: {raw_name}",
                     )
                     return no_match
 
@@ -271,28 +332,77 @@ class WorkflowMatcher:
     # ── 内部实现 ────────────────────────────────────────────────────────────
 
     def _collect_candidates(self) -> List[Dict[str, str]]:
-        """收集所有 .yaml 工作流文件 → 名称 + 描述列表。"""
+        """收集所有工作流 → 文件名 + 显示名(name 字段) + 描述列表。
+
+        带内存缓存 + mtime 失效判断：仅当工作流文件被修改/新增/删除时
+        才重新扫描 + 加载 YAML，否则直接返回缓存。
+        """
+        # ── 检查 mtime 是否变化 ──────────────────────────────────────
+        current_sig: Dict[str, float] = {}
+        all_files: List[Path] = []
+        for d in self._wf_engine._all_dirs():
+            all_files.extend(sorted(d.glob("*.yaml")))
+            all_files.extend(sorted(d.glob("*.yml")))
+
+        dirty = self._candidates_dirty
+        if not dirty:
+            # 快速路径：比对每个文件的 mtime，有变化才置 dirty
+            current_paths = set()
+            for p in all_files:
+                try:
+                    mtime = os.path.getmtime(p)
+                except OSError:
+                    continue
+                current_paths.add(str(p))
+                cached_mtime = self._candidates_sig.get(str(p))
+                if cached_mtime is None or cached_mtime != mtime:
+                    dirty = True
+                current_sig[str(p)] = mtime
+            # 文件被删除也视为 dirty
+            if not dirty and set(self._candidates_sig.keys()) != current_paths:
+                dirty = True
+        else:
+            for p in all_files:
+                try:
+                    current_sig[str(p)] = os.path.getmtime(p)
+                except OSError:
+                    pass
+
+        if not dirty:
+            return self._candidates_cache
+
+        # ── 重新加载 ──────────────────────────────────────────────────
         candidates: List[Dict[str, str]] = []
         seen: set[str] = set()
-        for d in self._wf_engine._all_dirs():
-            for p in sorted(d.glob("*.yaml")):
-                name = p.stem
-                if name in seen:
-                    continue
-                seen.add(name)
-                desc = ""
-                try:
-                    wf = self._wf_engine.load(name)
-                    if wf:
-                        desc = wf.description or ""
-                except Exception:
-                    pass
-                candidates.append({
-                    "name": name,
-                    "description": desc or "(无描述)",
-                    "source_path": str(p),
-                })
+        for p in all_files:
+            name = p.stem
+            if name in seen:
+                continue
+            seen.add(name)
+            desc = ""
+            display_name = ""
+            try:
+                wf = self._wf_engine.load(name)
+                if wf:
+                    desc = wf.description or ""
+                    display_name = wf.name or ""
+            except Exception:
+                pass
+            candidates.append({
+                "name": name,
+                "display_name": display_name or name,
+                "description": desc or "(无描述)",
+                "source_path": str(p),
+            })
+
+        self._candidates_cache = candidates
+        self._candidates_sig = current_sig
+        self._candidates_dirty = False
         return candidates
+
+    def invalidate_candidates_cache(self) -> None:
+        """显式标记候选缓存失效（外部修改工作流目录后调用）。"""
+        self._candidates_dirty = True
 
     @staticmethod
     def _get_description(name: str, candidates: List[Dict[str, str]]) -> str:
@@ -307,10 +417,11 @@ class WorkflowMatcher:
         candidates: List[Dict[str, str]],
     ) -> Dict[str, Any]:
         """调用 DeepSeek LLM 做工作流语义匹配。"""
-        # 构建候选列表文本
+        # 构建候选列表文本（同时给出文件名 name 与显示名 display_name，
+        # 让 LLM 能按中文/语义名称匹配）
         wf_lines = []
         for c in candidates:
-            wf_lines.append(f"  - name: {c['name']}")
+            wf_lines.append(f"  - name: {c['name']}  display_name: {c['display_name']}")
             if c.get("description"):
                 wf_lines.append(f"    description: {c['description']}")
         wf_text = "\n".join(wf_lines) if wf_lines else "（暂无工作流）"

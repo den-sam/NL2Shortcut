@@ -221,7 +221,7 @@ class IntentEngine:
         # 中文
         "\u590d\u5236": "copy", "\u7c98\u8d34": "paste", "\u526a\u5207": "cut",
         "\u64a4\u9500": "undo", "\u91cd\u505a": "redo",
-        "\u4fdd\u5b58": "save", "\u6253\u5f00": "open", "\u5173\u95ed": "close",
+        "\u4fdd\u5b58": "save", "\u5173\u95ed": "close",
         "\u67e5\u627e": "find", "\u641c\u7d22": "find", "\u66ff\u6362": "replace",
         "\u52a0\u7c97": "bold", "\u659c\u4f53": "italic", "\u4e0b\u5212\u7ebf": "underline",
         "\u5220\u9664": "delete", "\u6253\u5370": "print",
@@ -271,10 +271,13 @@ class IntentEngine:
         "\u641c\u7d22\u6587\u4ef6": "search_file",
         "\u8df3\u8f6c\u5230\u5b9a\u4e49": "go_to_definition", "\u8f6c\u5230\u5b9a\u4e49": "go_to_definition",
         "\u590d\u5236\u884c": "duplicate_line",
+        "\u8d44\u6e90\u7ba1\u7406\u5668": "ms_win_e",
+        "\u6253\u5f00\u8d44\u6e90\u7ba1\u7406\u5668": "ms_win_e",
+        "\u6587\u4ef6\u8d44\u6e90\u7ba1\u7406\u5668": "ms_win_e",
         # 拼音兜底（拉丁化的中文）
         "fuzhi": "copy", "zhantie": "paste", "jianqie": "cut",
         "chexiao": "undo", "chongzuo": "redo",
-        "baocun": "save", "dakai": "open", "guanbi": "close",
+        "baocun": "save", "guanbi": "close",
         "chazhao": "find", "sousuo": "find", "tihuan": "replace",
         "jiacu": "bold", "xieti": "italic", "xiahuaxian": "underline",
         "shanchu": "delete", "dayin": "print",
@@ -308,6 +311,20 @@ class IntentEngine:
     TERMINAL_OPEN_PATTERNS = [
         re.compile(r'^\s*(?:打开终端|打开cmd|打开命令行|打开命令提示符|打开powershell|打开power shell)\s*$'),
     ]
+
+    # ── 打开应用程序的统一流程 ──
+    # "打开X"（X 为应用名）统一走 Win → 搜索 → 等待 300ms → Enter 流程，
+    # 不再绑定 Ctrl+O（那是「打开文件对话框」的快捷键）。
+    # 例外：已注册的特定目标由各自的精确通道处理，不走此通用流程。
+    _OPEN_APP_EXCLUDES = frozenset({
+        # 资源管理器系列 → precache 精确命中 Win+E
+        "资源管理器", "文件资源管理器", "此电脑", "explorer",
+        # 终端系列 → _try_terminal_open 命中
+        "终端", "cmd", "命令行", "命令提示符", "powershell", "power shell",
+        # 任务视图 → precache 精确命中
+        "任务视图", "多任务视图", "时间线",
+    })
+    _OPEN_APP_RE = re.compile(r'^\s*打\s*开\s*(\S.+?)\s*$')
 
     # ── 组合模式（文件复制 / 移动 / 查找） ──
     # 在关键字层之前运行，以避免 "复制X到Y" 被误读为单个键盘快捷键
@@ -411,6 +428,13 @@ class IntentEngine:
         if comp is not None:
             return comp
 
+        # ── 打开应用程序检测 —— 在组合检测之后 ──
+        # 路径形式（"打开 C:\..."）已由上方 _try_composite 捕获；
+        # 此处仅处理通用"打开X"（X 为应用名）→ 统一开始菜单搜索流程。
+        oap = self._try_open_app(original)
+        if oap is not None:
+            return oap
+
         cleaned = self._clean_text(original)
 
         # 第 1 层：直接关键字匹配
@@ -473,6 +497,30 @@ class IntentEngine:
                     composite_plan=plan,
                 )
         return None
+
+    def _try_open_app(self, text: str) -> Optional[IntentResult]:
+        """检测 "打开X" 并生成统一的应用打开流程：Win → 搜索 → 等待 → Enter。
+
+        所有「打开X」（X 为应用名）均走此统一流程，不绑定 Ctrl+O。
+        例外：已注册的特定目标（资源管理器=Win+E、终端=Win+R→cmd）由各自的
+        精确通道处理，不走到这里。
+        路径形式（"打开 C:\\..."）由 _try_composite 的路径检测先捕获。
+        """
+        m = self._OPEN_APP_RE.match(text.strip())
+        if not m:
+            return None
+        app_name = m.group(1).strip()
+        if not app_name or app_name in self._OPEN_APP_EXCLUDES:
+            return None
+        from .composites import make_open_app
+        plan = make_open_app(app_name=app_name)
+        return IntentResult(
+            intent="open_app",
+            command="__composite__",
+            confidence=0.90,
+            matched_keyword=f"open_app: {app_name}",
+            composite_plan=plan,
+        )
 
     def _try_composite(self, text: str) -> Optional[IntentResult]:
         """检测文件复制 / 移动 / 查找的组合意图，如 '复制X到Y' / 'copy X to Y' / '找到X'。

@@ -498,6 +498,46 @@ def make_generic_composite(hint: str, text: str = "", keys: str = "") -> Composi
     )
 
 
+# 打开应用程序时的统一等待毫秒数（开始菜单搜索索引返回结果）
+_OPEN_APP_SEARCH_WAIT_MS = 300
+
+
+def make_open_app(app_name: str) -> CompositePlan:
+    """通过开始菜单搜索统一打开应用程序：Win → 输入名称 → 等待 → Enter。
+
+    所有「打开X」类操作（X 为应用名）均走此统一流程，不绑定 Ctrl+O。
+    例外：已注册的特定目标（资源管理器=Win+E、终端=Win+R→cmd）由各自的
+    精确匹配通道处理，不会走到这里。
+
+    Args:
+        app_name: 应用程序名称（如 "记事本"、"计算器"、"浏览器"）
+    """
+    return CompositePlan(
+        name="open_app",
+        description=f'开始菜单搜索并打开：「{app_name}」',
+        confidence=0.90,
+        reasoning=f"Win → 搜索「{app_name}」→ 等待 {_OPEN_APP_SEARCH_WAIT_MS}ms → Enter",
+        steps=[
+            CompositeStep(
+                kind="key", keys="Win",
+                description="Win 打开开始菜单搜索",
+            ),
+            CompositeStep(
+                kind="type", text=app_name,
+                description=f"输入应用名称：{app_name}",
+            ),
+            CompositeStep(
+                kind="wait", wait_ms=_OPEN_APP_SEARCH_WAIT_MS,
+                description="等待搜索结果",
+            ),
+            CompositeStep(
+                kind="key", keys="Enter",
+                description="Enter 打开首个搜索结果",
+            ),
+        ],
+    )
+
+
 def make_file_search_keyboard(pattern: str, target_path: Optional[str] = None) -> CompositePlan:
     """通过 Windows 资源管理器键盘操作查找文件（可选：找到后直接移动到目标）。
 

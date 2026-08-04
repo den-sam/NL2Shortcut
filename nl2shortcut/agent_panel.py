@@ -1,4 +1,4 @@
-﻿"""AgentPanel — NL2Shortcut is the Agent's high-speed execution endpoint.
+"""AgentPanel — NL2Shortcut is the Agent's high-speed execution endpoint.
 
 In this panel users can:
   1. Start/stop the Agent API server (the endpoint itself)
@@ -18,6 +18,7 @@ import time
 import threading
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -112,6 +113,50 @@ class _ApiCaller(QThread):
             self.finished.emit({"ok": False, "error": str(e)})
         except Exception as e:
             self.finished.emit({"ok": False, "error": repr(e)})
+
+
+class _SmartExecuteThread(QThread):
+    """后台线程：工作流优先智能执行管道。
+
+    Pipeline:
+      WorkflowMatcher.match() → 命中 → 加载工作流 → 执行
+                            → 未命中 → GoalPlanner.plan() → 执行 → plan_to_workflow() 保存
+    """
+    finished = pyqtSignal(dict)
+
+    def __init__(self, intent: str, dry_run: bool, timeout: float = 30.0):
+        super().__init__()
+        self._intent = intent
+        self._dry_run = dry_run
+        self._timeout = timeout
+
+    def run(self):
+        try:
+            from .master import KeyboardMasterAgent
+            master = KeyboardMasterAgent()
+            result = master.smart_execute(
+                self._intent,
+                dry_run=self._dry_run,
+                timeout=self._timeout,
+                learn=True,
+                auto_save=True,
+            )
+            self.finished.emit(result)
+        except Exception as e:
+            self.finished.emit({
+                "ok": False,
+                "pipeline": "error",
+                "error": str(e),
+                "intent": self._intent,
+                "elapsed_ms": 0,
+                "matched_workflow": None,
+                "match_confidence": 0.0,
+                "auto_saved": False,
+                "auto_saved_path": None,
+                "plan": None,
+                "steps_executed": 0,
+                "results": [],
+            })
 
 
 class AgentPanel(QWidget):
@@ -449,7 +494,7 @@ class AgentPanel(QWidget):
         """)
         cl.addWidget(self._chat, 1)
 
-        # Input row — 无边框，文字直接写在卡片里
+        # Input row — 带边框，融入卡片风格
         in_row = QHBoxLayout()
         in_row.setContentsMargins(16, 8, 16, 12)
         in_row.setSpacing(8)
@@ -458,14 +503,15 @@ class AgentPanel(QWidget):
         self._chat_input.setMinimumHeight(32)
         self._chat_input.setStyleSheet(f"""
             QLineEdit {{
-                background: transparent;
+                background: {CL_BG_INPUT};
                 color: {CL_TEXT};
-                border: none;
-                padding: 6px 0;
+                border: 1px solid {CL_BORDER};
+                border-radius: 6px;
+                padding: 6px 10px;
                 font-size: 13px;
             }}
             QLineEdit:focus {{
-                border: none;
+                border: 1px solid {CL_ACCENT};
             }}
         """)
         self._chat_input.returnPressed.connect(self._on_chat_send)
@@ -495,14 +541,15 @@ class AgentPanel(QWidget):
         body.addWidget(chat_card, 1)
 
         # Initial chat
-        self._append_chat("system", "👋  我是 NL2Shortcut Agent 演示。\n\n"
-            "我做的事很简单：把自然语言转成键盘快捷键。\n"
-            "OpenClaw / Claude Computer Use 等 AI Agent 调我时，背后走的就是这套 JSON API。\n\n"
+        self._append_chat("system", "👋  我是 NL2Shortcut — Keyboard Master Agent。\n\n"
+            "执行逻辑：\n"
+            "  ① 匹配已有工作流 → 直接执行\n"
+            "  ② 无匹配 → LLM 自动拆解 → 执行 → 自动保存为新工作流\n\n"
             "试试：\n"
             "  • \"保存这个文件\"\n"
             "  • \"帮我撤销刚才的操作\"\n"
             "  • \"复制这一段\"\n\n"
-            "启动上方 Agent API 后，Agent 就能通过 HTTP 调我执行。")
+            "启动上方 Agent API 后，外部 AI Agent 可通过 HTTP 调用我。")
 
     # ── Chat logic ───────────────────────────────────────────────────
     def _on_chat_send(self):
@@ -511,15 +558,13 @@ class AgentPanel(QWidget):
             return
         self._chat_input.clear()
         self._append_chat("user", text)
-        # Call the agent API
-        self._append_chat("thinking", "🔍  正在识别意图...")
+
+        # 工作流优先智能执行
+        dry_run = self._dry_run_chk.isChecked()
+        self._append_chat("thinking", "🔍  正在匹配已有工作流...")
         if self._caller and self._caller.isRunning():
             return
-        self._caller = _ApiCaller(self._endpoint, "/v1/execute", {
-            "intent": text,
-            "dry_run": self._dry_run_chk.isChecked(),
-            "request_id": f"gui-chat-{int(time.time()*1000)}",
-        })
+        self._caller = _SmartExecuteThread(text, dry_run=dry_run)
         self._caller.finished.connect(self._on_chat_response)
         self._caller.start()
 
@@ -530,77 +575,228 @@ class AgentPanel(QWidget):
         cursor.select(cursor.LineUnderCursor)
         cursor.removeSelectedText()
         cursor.deletePreviousChar()
-        if not result["ok"]:
-            err = result.get('error', '?')
-            if 'Connection' in str(err) or 'refused' in str(err) or 'getaddrinfo' in str(err):
-                hint = "服务器未启动。请先点击上方「▶ 启动 Agent API」按钮。"
-            elif 'timeout' in str(err).lower():
-                hint = "服务器响应超时，请稍后重试。"
-            else:
-                hint = f"请确认 Agent API 已启动（点击上方按钮），然后重试。"
-            self._append_chat("error", f"❌  调用失败：{err}\n\n{hint}")
-            return
-        body = result["body"]
-        if not body.get("ok"):
-            err_msg = body.get('error', {}).get('message', '?')
-            self._append_chat("error", f"❌  执行失败：{err_msg}\n\n"
-                              f"请检查输入是否正确，或尝试其他写法。")
-            return
-        r = body.get("result", {})
-        meta = body.get("metadata", {})
-        alt_count = len(body.get("alternatives", []))
-        alt_txt = f"  ·  {alt_count} 个备选" if alt_count else ""
 
-        # ── Composite (file copy/move) plan ──
-        if body.get("mode") == "composite" or r.get("mode") == "composite":
-            plan_dict = body.get("composite_plan")
-            if plan_dict:
-                from .composites import CompositePlan
-                plan = CompositePlan.from_dict(plan_dict)
-                reply = (
-                    f"📋  识别为复合操作\n"
-                    f"  • 类型：{plan.name}\n"
-                    f"  • 置信度：{plan.confidence:.2f}{alt_txt}\n"
-                    f"  • 说明：{plan.reasoning}\n\n"
-                    f"{plan.format_human()}\n\n"
-                    f"⚠️  此操作需 Agent 视觉模型分步执行（右键定位、菜单识别等）。\n"
-                    f"    当前环境可查看完整计划；实际点击需上游 Agent 接入视觉能力。"
+        pipeline = result.get("pipeline", "error")
+        elapsed = result.get("elapsed_ms", 0)
+        steps_executed = result.get("steps_executed", 0)
+        matched_wf = result.get("matched_workflow")
+        auto_saved = result.get("auto_saved", False)
+        auto_saved_path = result.get("auto_saved_path")
+        step_results = result.get("results", [])
+
+        # ── error ──
+        if pipeline == "error" or (not result.get("ok") and result.get("error")):
+            self._append_chat("error",
+                f"❌  执行失败：{result.get('error', '未知错误')}\n\n"
+                f"请检查输入是否正确，或尝试其他写法。")
+            return
+
+        # ── workflow_match ──
+        if pipeline == "workflow_match":
+            status = "✅" if result["ok"] else "⚠️"
+            # Header
+            wf_header = (
+                f'<div style="margin: 10px 20% 10px 0; background: #FFFFFF; '
+                f'border: 1px solid {CL_BORDER}; '
+                f'border-radius: 4px 14px 14px 14px; padding: 12px 16px;">'
+                f'<div style="color: {CL_TEXT_MUTED}; font-size: 10px; font-weight: 600; '
+                f'margin-bottom: 4px;">Agent</div>'
+                f'<div style="color: {CL_TEXT}; font-size: 14px; line-height: 1.6;">'
+                f'{status}  工作流匹配执行 &nbsp;·&nbsp; '
+                f'<span style="color:{CL_ACCENT};font-weight:600;">{matched_wf}</span> &nbsp;·&nbsp; '
+                f'{steps_executed} 步 &nbsp;·&nbsp; {elapsed:.0f}ms'
+                f'</div>'
+                f'</div>'
+            )
+            self._chat.append(wf_header)
+
+            # Step results as individual cards
+            for i, sr in enumerate(step_results):
+                icon = "✅" if sr.get("success") else "❌"
+                step_name = sr.get("step", f"步骤{i+1}")
+                output = sr.get("output", "")
+                err = sr.get("error", "")
+                result_text = f"{icon} {step_name}"
+                if output:
+                    result_text += f' → <span style="color:{CL_ACCENT};">{output[:40]}</span>'
+                if err:
+                    result_text += f' <span style="color:{CL_DANGER};">({err})</span>'
+                step_html = (
+                    f'<div style="margin: 4px 20% 4px 0; background: {CL_BG_PANEL}; '
+                    f'border: 1px solid {CL_BORDER}; border-left: 3px solid {CL_SUCCESS}; '
+                    f'border-radius: 6px; padding: 8px 14px; font-size: 13px;">'
+                    f'<span style="background: {CL_SUCCESS}; color: white; border-radius: 10px; '
+                    f'padding: 1px 8px; font-size: 11px; font-weight: 600; margin-right: 8px;">{i+1}</span>'
+                    f'<span style="color: {CL_TEXT};">{result_text}</span>'
+                    f'</div>'
                 )
-            else:
-                reply = "✅  复合操作（计划为空）"
-            self._append_chat("agent", reply)
-            return
+                self._chat.append(step_html)
 
-        stability = meta.get("stability", "unknown")
-        stab_color = {CL_SUCCESS: "🟢", CL_WARNING: "🟡", CL_DANGER: "🔴"}.get(
-            {CL_SUCCESS: "high", CL_WARNING: "medium", CL_DANGER: "low"}.get(stability, ""), "⚪"
-        )
-        api_eq = meta.get("api_equivalent")
-        api_txt = f"\n  • API 替代：{api_eq}" if api_eq else ""
-        gui_fb = meta.get("gui_fallback")
-        gui_txt = f"\n  • GUI 兜底：{gui_fb}" if gui_fb else ""
+        # ── planner_generated ──
+        elif pipeline == "planner_generated":
+            status = "✅" if result["ok"] else "⚠️"
+            plan = result.get("plan")
+            plan_steps = plan.get("steps", []) if plan else []
 
-        reply = (
-            f"✅  识别完成\n"
-            f"  • 指令：{r.get('command', '?')}\n"
-            f"  • 按键：{r.get('key_combination', '?')}\n"
-            f"  • 置信度：{r.get('confidence', 0):.2f}{alt_txt}\n"
-            f"  • 稳定性：{stability}  {stab_color}{api_txt}{gui_txt}\n"
-            f"  • 耗时：{r.get('execution_time_ms', 0):.1f}ms\n"
-        )
-        self._append_chat("agent", reply)
+            # Header
+            header_html = (
+                f'<div style="margin: 10px 20% 10px 0; background: #FFFFFF; '
+                f'border: 1px solid {CL_BORDER}; '
+                f'border-radius: 4px 14px 14px 14px; padding: 12px 16px;">'
+                f'<div style="color: {CL_TEXT_MUTED}; font-size: 10px; font-weight: 600; '
+                f'margin-bottom: 4px;">Agent</div>'
+                f'<div style="color: {CL_TEXT}; font-size: 14px; line-height: 1.6;">'
+                f'{status}  LLM 拆解执行 &nbsp;·&nbsp; {len(plan_steps)} 步 &nbsp;·&nbsp; {elapsed:.0f}ms'
+                f'</div>'
+                f'</div>'
+            )
+            self._chat.append(header_html)
+
+            # Step-by-step cards
+            for i, ps in enumerate(plan_steps):
+                action = ps.get("action", "?")
+                desc = ps.get("description", "")
+                key = ps.get("key_combination", "")
+                text = ps.get("text", "")
+                cmd = ps.get("command", "")
+                wait_ms = ps.get("wait_ms", 0)
+                confidence = ps.get("confidence", 1.0)
+                reasoning = ps.get("reasoning", "")
+
+                # Determine step detail
+                if action == "shortcut" and key:
+                    detail = f'<span style="color:{CL_ACCENT};font-weight:600;">{key}</span>'
+                elif action == "type" and text:
+                    detail = f'输入 "<span style="color:{CL_ACCENT};">{text[:30]}</span>"'
+                elif action == "shell" and cmd:
+                    detail = f'<span style="color:{CL_WARNING};">$</span> {cmd[:50]}'
+                elif action == "wait":
+                    detail = f'等待 {wait_ms}ms'
+                elif action == "composite":
+                    detail = f'<span style="color:{CL_INFO};">🔍</span> {ps.get("composite_hint", "")[:50]}'
+                elif action == "tab":
+                    direction_map = {"tab": "Tab", "shift_tab": "Shift+Tab",
+                                     "left": "←", "right": "→", "up": "↑", "down": "↓"}
+                    d = direction_map.get(ps.get("direction", "tab"), "Tab")
+                    n = ps.get("n", 1)
+                    detail = f'{d} × {n}'
+                else:
+                    detail = action
+
+                step_html = (
+                    f'<div style="margin: 4px 20% 4px 0; background: {CL_BG_PANEL}; '
+                    f'border: 1px solid {CL_BORDER}; border-left: 3px solid {CL_ACCENT}; '
+                    f'border-radius: 6px; padding: 8px 14px; font-size: 13px;">'
+                    f'<div style="display: flex; align-items: center; gap: 8px;">'
+                    f'<span style="background: {CL_ACCENT}; color: white; border-radius: 10px; '
+                    f'padding: 1px 8px; font-size: 11px; font-weight: 600;">{i+1}</span>'
+                    f'<span style="color: {CL_TEXT}; font-weight: 600;">{desc}</span>'
+                    f'<span style="color: {CL_TEXT_DIM}; font-size: 12px; margin-left: auto;">{detail}</span>'
+                    f'</div>'
+                )
+                if confidence < 1.0:
+                    conf_color = CL_WARNING if confidence >= 0.5 else CL_DANGER
+                    step_html += (
+                        f'<div style="color: {conf_color}; font-size: 11px; '
+                        f'padding-left: 28px; margin-top: 2px;">'
+                        f'置信度 {confidence:.0%}</div>'
+                    )
+                if reasoning:
+                    step_html += (
+                        f'<div style="color: {CL_TEXT_MUTED}; font-size: 11px; '
+                        f'padding-left: 28px; margin-top: 2px; font-style: italic;">'
+                        f'💡 {reasoning}</div>'
+                    )
+                step_html += '</div>'
+                self._chat.append(step_html)
+
+            # Execution results
+            if step_results:
+                result_header = (
+                    f'<div style="margin: 6px 20% 4px 0; font-size: 12px; color: {CL_TEXT_DIM}; '
+                    f'padding-left: 4px; font-weight: 600;">执行结果：</div>'
+                )
+                self._chat.append(result_header)
+                for i, sr in enumerate(step_results):
+                    icon = "✅" if sr.get("success") else "❌"
+                    step_name = sr.get("step", f"步骤{i+1}")
+                    output = sr.get("output", "")
+                    err = sr.get("error", "")
+                    result_text = f"{icon} {step_name}"
+                    if output:
+                        result_text += f' → <span style="color:{CL_ACCENT};">{output[:40]}</span>'
+                    if err:
+                        result_text += f' <span style="color:{CL_DANGER};">({err})</span>'
+                    result_html = (
+                        f'<div style="margin: 2px 20% 2px 0; font-size: 12px; '
+                        f'padding: 4px 12px; color: {CL_TEXT};">{result_text}</div>'
+                    )
+                    self._chat.append(result_html)
+
+            # Workflow save notification
+            if auto_saved:
+                saved_html = (
+                    f'<div style="margin: 10px 20% 10px 0; background: {CL_ACCENT_BG}; '
+                    f'border: 1px solid {CL_ACCENT}; '
+                    f'border-radius: 6px; padding: 10px 14px;">'
+                    f'<div style="color: {CL_ACCENT_P}; font-size: 12px; font-weight: 600;">'
+                    f'📁  已自动保存为工作流</div>'
+                    f'<div style="color: {CL_TEXT}; font-size: 12px; margin-top: 4px;">'
+                    f'<b>文件名：</b>{Path(auto_saved_path).name if auto_saved_path else "?"}<br>'
+                    f'<b>路径：</b>{auto_saved_path or "?"}'
+                    f'</div>'
+                    f'<div style="color: {CL_TEXT_DIM}; font-size: 11px; margin-top: 4px;">'
+                    f'下次说相同意图时将直接匹配此工作流执行'
+                    f'</div>'
+                    f'</div>'
+                )
+                self._chat.append(saved_html)
+        elif pipeline == "single_shortcut":
+            sr = step_results[0] if step_results else {}
+            status = "✅" if result["ok"] else "❌"
+            output = sr.get("output", "?")
+            err = sr.get("error", "")
+            shortcut_html = (
+                f'<div style="margin: 10px 20% 10px 0; background: #FFFFFF; '
+                f'border: 1px solid {CL_BORDER}; '
+                f'border-radius: 4px 14px 14px 14px; padding: 12px 16px;">'
+                f'<div style="color: {CL_TEXT_MUTED}; font-size: 10px; font-weight: 600; '
+                f'margin-bottom: 4px;">Agent</div>'
+                f'<div style="color: {CL_TEXT}; font-size: 14px; line-height: 1.6;">'
+                f'{status}  快捷执行 &nbsp;·&nbsp; '
+                f'<span style="color:{CL_ACCENT};font-weight:600;">{output}</span> &nbsp;·&nbsp; '
+                f'{elapsed:.0f}ms'
+                f'</div>'
+            )
+            if err:
+                shortcut_html += f'<div style="color: {CL_DANGER}; font-size: 12px; margin-top: 4px;">⚠ {err}</div>'
+            shortcut_html += '</div>'
+            self._chat.append(shortcut_html)
+
+        else:
+            unknown_html = (
+                f'<div style="margin: 10px 20% 10px 0; background: #FFFFFF; '
+                f'border: 1px solid {CL_DANGER}; '
+                f'border-radius: 4px 14px 14px 14px; padding: 12px 16px;">'
+                f'<div style="color: {CL_TEXT_MUTED}; font-size: 10px; font-weight: 600; '
+                f'margin-bottom: 4px;">Agent</div>'
+                f'<div style="color: {CL_DANGER}; font-size: 14px;">❌ 未知管道：{pipeline}</div>'
+                f'</div>'
+            )
+            self._chat.append(unknown_html)
 
     def _append_chat(self, who: str, text: str):
         safe = text.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
 
         if who == "user":
-            # 用户气泡：右侧蓝色
+            # 用户气泡：右侧浅色（与 Agent 气泡对称，黑字清晰可读）
             html = (
-                f'<div style="margin: 10px 0 10px 20%; background: {CL_ACCENT}; '
+                f'<div style="margin: 10px 0 10px 20%; background: {CL_ACCENT_BG}; '
+                f'border: 1px solid {CL_ACCENT}; '
                 f'border-radius: 14px 14px 4px 14px; padding: 12px 16px;">'
-                f'<div style="color: rgba(255,255,255,0.7); font-size: 10px; font-weight: 600; '
-                f'margin-bottom: 4px;">你</div>'
-                f'<div style="color: white; font-size: 14px; line-height: 1.6;">{safe}</div>'
+                f'<div style="color: {CL_ACCENT_P}; font-size: 10px; font-weight: 600; '
+                f'margin-bottom: 4px; text-align: right;">你</div>'
+                f'<div style="color: {CL_TEXT}; font-size: 14px; line-height: 1.6; text-align: right;">{safe}</div>'
                 f'</div>'
             )
         elif who == "agent":

@@ -293,9 +293,22 @@ class _INPUT(ctypes.Structure):
 class WindowsAdapter(KeyboardAdapter):
     """Windows native adapter using SendInput for hotkeys,
     pydirectinput for mouse / text (DirectInput scan-code compatible),
-    pyautogui for scroll / screenshot fallback."""
+    pyautogui for scroll / screenshot fallback.
+
+    Uses Rust native module (nl2shortcut_native) for SendInput when available,
+    falling back to Python ctypes.
+    """
 
     def __init__(self):
+        # ── 快捷键执行层主后端：C++ 原生 DLL ──
+        self._native = None
+        try:
+            from .native_loader import native as _nat
+            if _nat.available:
+                self._native = _nat
+        except Exception:
+            pass
+
         self._dll = ctypes.WinDLL("user32", use_last_error=True)
         # Set up SendInput argtypes
         self._dll.SendInput.argtypes = (
@@ -338,6 +351,16 @@ class WindowsAdapter(KeyboardAdapter):
             )
 
     def send_keys(self, key_combination: str) -> None:
+        # ── 主路径：C++ 原生 DLL ──
+        # 整个组合键在 C++ 侧一次 SendInput 批量提交，避免逐键跨 ctypes 边界。
+        # 只有在原生调用**明确失败**时才回退 Python，静默失败会导致「什么都没发生」。
+        if self._native is not None:
+            try:
+                if self._native.send_hotkey(key_combination):
+                    return
+            except Exception:
+                pass  # 回退到下方 Python 实现
+
         modifiers, main_key = parse_key_string(key_combination)
         is_upper = main_key.isupper() and len(main_key) == 1
 
@@ -377,6 +400,14 @@ class WindowsAdapter(KeyboardAdapter):
         (Chinese, emoji, etc.) on Windows. The character's UTF-16 code unit
         goes into wScan; wVk must be 0.
         """
+        # 主路径：C++ 原生 DLL
+        if self._native is not None:
+            try:
+                if self._native.send_unicode_char(ch):
+                    return
+            except Exception:
+                pass
+
         code = ord(ch)
         inp = _INPUT()
         inp.type = INPUT_KEYBOARD
@@ -397,6 +428,14 @@ class WindowsAdapter(KeyboardAdapter):
 
     def _type_via_clipboard(self, text: str) -> None:
         """Type non-ASCII text (Chinese, etc.) via clipboard + Ctrl+V."""
+        # Use Rust native module if available
+        if self._native is not None:
+            try:
+                self._native.type_via_clipboard(text)
+                return
+            except Exception:
+                pass
+
         import ctypes
         import time
 

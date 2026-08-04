@@ -1,4 +1,4 @@
-﻿"""NL2Shortcut Agent API 的自检模块。
+"""NL2Shortcut Agent API 的自检模块。
 
 在注入键盘快捷键之后，Agent 无法"看到"屏幕来确认它是否真正生效。
 我们通过采集注入后 50ms 的系统状态，并与注入前的快照进行对比来近似判断。
@@ -37,10 +37,15 @@ try:
 except Exception:
     _HAS_WIN32GUI = False
 
+# ctypes 始终可用（Windows 内置），作为 win32gui 的后备
+import ctypes
+import ctypes.wintypes
+_HAS_CTYPE = hasattr(ctypes, 'windll')
+
 
 # 默认值：注入后 50ms 的采样窗口（依据 2026 规范）
 DEFAULT_DELAY_MS = 50
-MAX_DELAY_MS = 200
+MAX_DELAY_MS = 1000  # 系统级操作（如 Win+E 打开资源管理器）需要更长等待
 
 
 def _read_clipboard() -> Optional[str]:
@@ -61,16 +66,78 @@ def _read_clipboard() -> Optional[str]:
 
 
 def _read_foreground_window() -> Optional[str]:
-    """读取前台窗口的标题（Windows）。"""
-    if not _HAS_WIN32GUI:
-        return None
-    try:
-        hwnd = win32gui.GetForegroundWindow()
-        if hwnd:
-            return win32gui.GetWindowText(hwnd)
-    except Exception:
-        return None
+    """读取前台窗口的标题和进程名（Windows）。
+
+    返回格式: "窗口标题|进程名" — 进程名用于检测系统级操作
+    （如 Win+E 打开资源管理器后前台进程变为 explorer.exe）。
+
+    优先使用 win32gui，未安装时用 ctypes 后备。
+    """
+    # ── 路径 1: win32gui ──
+    if _HAS_WIN32GUI:
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                title = win32gui.GetWindowText(hwnd)
+                proc_name = _get_process_name(hwnd)
+                return f"{title}|{proc_name}"
+        except Exception:
+            pass
+
+    # ── 路径 2: ctypes 后备（无需 pywin32）──
+    if _HAS_CTYPE:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                # 获取窗口标题
+                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+                proc_name = _get_process_name_ctypes(hwnd)
+                return f"{title}|{proc_name}"
+        except Exception:
+            pass
+
     return None
+
+
+def _get_process_name(hwnd) -> str:
+    """通过 win32gui/win32process 获取窗口进程名。"""
+    try:
+        import win32process
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return _get_proc_name_by_pid(pid)
+    except Exception:
+        return ""
+
+
+def _get_process_name_ctypes(hwnd) -> str:
+    """通过 ctypes 获取窗口进程名（无需 pywin32）。"""
+    try:
+        pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return _get_proc_name_by_pid(pid.value)
+    except Exception:
+        return ""
+
+
+def _get_proc_name_by_pid(pid: int) -> str:
+    """通过 PID 获取进程可执行文件名。"""
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if h:
+            buf = ctypes.create_unicode_buffer(1024)
+            if ctypes.windll.psapi.GetModuleFileNameExW(h, None, buf, 1024):
+                name = buf.value.rsplit("\\", 1)[-1].lower()
+                ctypes.windll.kernel32.CloseHandle(h)
+                return name
+            ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:
+        pass
+    return ""
 
 
 # 操作 -> 检查函数。每个检查函数都以 (pre_state, post_state) 调用，
@@ -95,8 +162,18 @@ def _check_window_changed(pre, post) -> Tuple[Optional[bool], str]:
     if post is None or pre is None:
         return None, "window info not available"
     if pre != post:
-        return True, "foreground window changed"
-    return False, "foreground window unchanged"
+        # 检查是否前台进程变为 explorer.exe（Win+E 打开资源管理器）
+        pre_proc = pre.split("|", 1)[-1] if "|" in pre else ""
+        post_proc = post.split("|", 1)[-1] if "|" in post else ""
+        if post_proc == "explorer.exe" and pre_proc != "explorer.exe":
+            return True, "资源管理器窗口已激活 (explorer.exe)"
+        return True, "前台窗口已切换"
+    # 窗口未变化：检查是否目标窗口已经是前台窗口
+    # （例如资源管理器已打开，再按 Win+E 不会改变前台窗口）
+    proc = post.split("|", 1)[-1] if "|" in post else ""
+    if proc == "explorer.exe":
+        return True, "资源管理器已是前台窗口（无需切换）"
+    return False, "前台窗口未变化"
 
 
 def _check_mtime_changed(pre, post) -> Tuple[Optional[bool], str]:
@@ -118,6 +195,20 @@ _OPERATION_HINTS: List[Tuple[str, str, str]] = [
     ("alt_tab",         "window",    "前台窗口已切换"),
     ("alt+tab",         "window",    "前台窗口已切换"),
     ("switch_app",      "window",    "前台窗口已切换"),
+    # ── 系统级操作：通过窗口标题变化验证 ──
+    ("ms_win_e",        "window",    "资源管理器窗口已打开"),
+    ("open_explorer",   "window",    "资源管理器窗口已打开"),
+    ("ms_win_e_2",      "window",    "资源管理器窗口已打开"),
+    ("run_dialog",      "window",    "运行对话框已打开"),
+    ("ms_win_r",        "window",    "运行对话框已打开"),
+    ("lock_screen",     "window",    "屏幕已锁定"),
+    ("ms_win_l",        "window",    "屏幕已锁定"),
+    ("task_manager",    "window",    "任务管理器已打开"),
+    ("task_view",       "window",    "任务视图已打开"),
+    ("ms_win_tab",      "window",    "任务视图已打开"),
+    ("minimize",        "window",    "窗口已最小化"),
+    ("ms_win_d",        "window",    "桌面已显示"),
+    # ── 编辑操作：无可观察信号 ──
     ("undo",            "noop",      "没有可观察的信号"),
     ("redo",            "noop",      "没有可观察的信号"),
     ("select",          "noop",      "没有可观察的信号"),

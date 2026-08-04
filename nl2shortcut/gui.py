@@ -25,7 +25,8 @@ try:
         QLabel, QLineEdit, QPushButton, QCheckBox,
         QTableWidget, QTableWidgetItem, QTextEdit, QHeaderView,
         QMessageBox, QSplitter, QGroupBox, QGridLayout, QStatusBar,
-        QMenuBar, QMenu, QAction, QProgressBar, QStyleFactory,
+        QMenuBar, QMenu, QAction, QProgressBar, QStyleFactory, QStyle,
+        QStyledItemDelegate,
         QComboBox, QShortcut as QtShortcut, QShortcut, QFrame, QStackedWidget,
         QScrollArea, QSizePolicy, QSpacerItem, QToolButton,
         QDialog, QDialogButtonBox,
@@ -225,16 +226,6 @@ QLineEdit:focus {{
 }}
 QLineEdit::placeholder {{
     color: {CL_TEXT_MUTED};
-}}
-
-/* 导航栏搜索框 — 点击/聚焦时不显示边框 */
-#searchInput {{
-    border: 1px solid {CL_BORDER};
-    border-radius: 4px;
-}}
-#searchInput:focus {{
-    border: 1px solid {CL_BORDER};
-    padding: 8px 12px;
 }}
 
 /* 主输入区（多行 QTextEdit，完全融入卡片，无任何边框） */
@@ -954,6 +945,15 @@ class ExecutePanel(QWidget):
             lambda: self._input.clear() if self._input.hasFocus() else None)
 
 class ShortcutsPanel(QWidget):
+    """快捷键库面板。"""
+
+    class _NoFocusDelegate(QStyledItemDelegate):
+        """绘制单元格时去掉焦点虚线/实线边框，保持选中背景色。"""
+
+        def paint(self, painter, option, index):
+            option.state &= ~QStyle.State_HasFocus
+            super().paint(painter, option, index)
+
     def __init__(self, agent: ShortcutAgent, parent=None):
         super().__init__(parent)
         self._agent = agent
@@ -979,7 +979,6 @@ class ShortcutsPanel(QWidget):
         # 工具栏
         toolbar = QHBoxLayout()
         self._search = QLineEdit()
-        self._search.setObjectName("searchInput")
         self._search.setPlaceholderText("搜索快捷键...(命令 / 描述 / 按键)")
         self._search.setMinimumHeight(36)
         toolbar.addWidget(self._search, stretch=2)
@@ -1021,6 +1020,7 @@ class ShortcutsPanel(QWidget):
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
         self._table.setSortingEnabled(True)
+        self._table.setItemDelegate(self._NoFocusDelegate(self._table))
 
         h = self._table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -2307,6 +2307,34 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch()
 
+        # ── Mini Dialog 启动按钮 ──
+        mini_btn = QPushButton("💬 迷你对话窗")
+        mini_btn.setObjectName("miniLaunchBtn")
+        mini_btn.setCursor(Qt.PointingHandCursor)
+        mini_btn.setToolTip("启动迷你浮动对话窗（全局热键 Ctrl+Alt+M 唤出）")
+        mini_btn.setMinimumHeight(36)
+        mini_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: #10B981;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                margin: 4px 12px 4px 12px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: 'Microsoft YaHei';
+            }}
+            QPushButton:hover {{
+                background: #059669;
+            }}
+            QPushButton:pressed {{
+                background: #047857;
+            }}
+        """)
+        mini_btn.clicked.connect(self._launch_mini_dialog)
+        sidebar_layout.addWidget(mini_btn)
+
         # ── Overlay 启动按钮 ──
         overlay_btn = QPushButton("⚡ 启动 Overlay")
         overlay_btn.setObjectName("overlayLaunchBtn")
@@ -2457,6 +2485,10 @@ class MainWindow(QMainWindow):
             view_menu.addAction(act)
 
         tool_menu = menubar.addMenu("工具(&T)")
+        mini_action = QAction("启动迷你对话窗(&M)...", self)
+        mini_action.setShortcut(QKeySequence("Ctrl+Alt+M"))
+        mini_action.triggered.connect(self._launch_mini_dialog)
+        tool_menu.addAction(mini_action)
         overlay_action = QAction("启动全局热键 Overlay(&O)...", self)
         overlay_action.setShortcut(QKeySequence("Ctrl+Alt+O"))
         overlay_action.triggered.connect(self._launch_overlay)
@@ -2710,6 +2742,23 @@ class MainWindow(QMainWindow):
     def _show_llm_settings(self):
         # ── 启动 Overlay (后台进程) ──
         pass
+
+    def _launch_mini_dialog(self):
+        """Launch the mini floating dialog in background (tray + global hotkey)."""
+        import subprocess
+        import shutil
+        import os
+        python = shutil.which("python") or shutil.which("python3") or "python"
+        try:
+            subprocess.Popen(
+                [python, "-m", "nl2shortcut", "mini"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x00000008,
+            )
+            self.statusBar().showMessage("  迷你对话窗已启动 (Ctrl+Alt+M 唤出)", 4000)
+        except Exception as e:
+            QMessageBox.warning(self, "启动失败", f"迷你对话窗启动失败:\n{e}")
 
     def _launch_overlay(self):
         """Launch NL2Shortcut overlay in background (system tray + global hotkey)."""

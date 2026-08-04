@@ -289,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     ovp.add_argument("--hotkey", default="<alt>+<shift>+s",
                      help="Global hotkey combo (default: <alt>+<shift>+s)")
 
+    # ———— Mini Dialog ————
+    mdp = sp.add_parser("mini", help="Launch mini floating chat dialog (global hotkey)")
+    mdp.add_argument("--no-tray", action="store_true", help="Don't show system tray icon")
+    mdp.add_argument("--hotkey", default="ctrl+alt+m",
+                     help="Global hotkey combo (default: ctrl+alt+m)")
+
     # ———— MCP Server (Model Context Protocol) ————
     mp = sp.add_parser("mcp-server",
                        help="Start the MCP tool server (Model Context Protocol)")
@@ -907,6 +913,16 @@ def cmd_overlay(agent, args) -> int:
     return 0
 
 
+def cmd_mini(agent, args) -> int:
+    """Start the mini floating dialog (background tray + global hotkey)."""
+    from .mini_dialog import main as mini_main
+    mini_main(
+        show_tray=not getattr(args, 'no_tray', False),
+        hotkey=getattr(args, 'hotkey', 'ctrl+alt+m'),
+    )
+    return 0
+
+
 def cmd_type(agent, args) -> int:
     text = " ".join(args.text)
     print(agent.type_text(text, interval=args.interval))
@@ -1093,7 +1109,7 @@ def main(args=None):
         args = _sys.argv[1:]
     valid_cmds = {"exec","run","list","search","stats","benchmark","repl","gui",
                   "master","smart","plan","suggest","start-server","stop-server","type",
-                  "click","scroll","screenshot","mouse","find","overlay",
+                  "click","scroll","screenshot","mouse","find","overlay","mini",
                   "mcp-server","agent-api","composite","workflow","self-test"}
     if args and args[0] not in valid_cmds and not args[0].startswith("-"):
         args = ["run"] + list(args)
@@ -1133,6 +1149,7 @@ def main(args=None):
         "mouse": cmd_mouse,
         "find": cmd_find,
         "overlay": cmd_overlay,
+        "mini": cmd_mini,
         "agent-api": cmd_agent_api,
         "composite": cmd_composite,
         "mcp-server": cmd_mcp_server,

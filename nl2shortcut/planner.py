@@ -534,12 +534,15 @@ class GoalPlanner:
 
     def __init__(self, api_key: Optional[str] = None,
                  shared_cache: Optional[SemanticCache] = None,
-                 router: Optional[ModelRouter] = None):
+                 router: Optional[ModelRouter] = None,
+                 db: Optional[object] = None):
         """
         Args:
             api_key: DeepSeek API Key。若为 None，从环境变量 / 配置文件中加载。
             shared_cache: 可选外部共享缓存实例（来自 ContextStore）。
             router: 可选 ModelRouter 实例（用于 AVR 路由）。
+            db: 可选 DatabaseManager 实例。若为 None，在首次 _db_increment_shortcut
+                调用时延迟创建并复用（原实现每次调用都新建 DatabaseManager，开销 5-10ms）。
         """
         self._api_key = api_key or _load_api_key()
         self._available = bool(self._api_key)
@@ -551,6 +554,10 @@ class GoalPlanner:
 
         # 模型路由：AVR 调度（可选）
         self._router = router
+
+        # DatabaseManager 单例：避免每次 _db_increment_shortcut 都新建实例
+        # （原实现每次都 DatabaseManager(config_dir / "shortcuts.db")，含 PRAGMA + 检查）
+        self._db: Optional[object] = db
 
     @property
     def available(self) -> bool:
@@ -979,13 +986,15 @@ class GoalPlanner:
 
     def _db_increment_shortcut(self, key_combination: str) -> None:
         """如果 key_combination 命中已注册的 shortcut 命令，累加其频率。"""
-        # 避免循环导入：仅在需要时从 database 查找
-        # 这里延迟 import，保持模块级 import 干净
+        # 复用注入或延迟初始化的 DatabaseManager 单例
+        # （原实现每次调用都新建 DatabaseManager，含 PRAGMA + 检查，开销 5-10ms）
         try:
-            from .database import DatabaseManager
-            from pathlib import Path
-            config_dir = Path.home() / ".nl2shortcut"
-            db = DatabaseManager(config_dir / "shortcuts.db")
+            if self._db is None:
+                from .database import DatabaseManager
+                from pathlib import Path
+                config_dir = Path.home() / ".nl2shortcut"
+                self._db = DatabaseManager(config_dir / "shortcuts.db")
+            db = self._db
             # 根据 key_combination 查找对应 command 并累加频率
             # 简化：key 格式如 "Ctrl+C"，查找 command="copy" 的条目
             reverse_map = {

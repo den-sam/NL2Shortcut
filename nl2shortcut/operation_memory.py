@@ -23,6 +23,7 @@ if __name__ != "nl2shortcut.operation_memory":
         _sys.path.insert(0, _grandparent)
 
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
@@ -235,20 +236,32 @@ class OperationMemory:
             db_path = str(config_dir / "operation_memory.db")
         self.db_path = Path(db_path)
         self._records_since_learn: int = 0
+        # 单例连接 + 锁：避免每次方法调用都新建 SQLite 连接（原实现每次 1-5ms 开销）
+        self._conn_lock = threading.RLock()
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
     # ── 内部工具 ──────────────────────────────────────────────────────────────
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        """返回复用的单例 SQLite 连接（线程安全）。
+
+        原实现每次方法调用都新建连接 + PRAGMA，开销 1-5ms。
+        改为模块实例级单例 + RLock 保护，所有方法共用一个连接。
+        WAL 模式支持并发读 + 单写，多线程环境下安全。
+        """
+        with self._conn_lock:
+            if self._conn is None:
+                conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                self._conn = conn
+            return self._conn
 
     def _init_db(self) -> None:
         conn = self._get_conn()
-        try:
+        with self._conn_lock:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS op_records (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -281,8 +294,6 @@ class OperationMemory:
                 CREATE INDEX IF NOT EXISTS idx_patterns_name ON op_patterns(name);
             """)
             conn.commit()
-        finally:
-            conn.close()
 
     def _now_iso(self) -> str:
         return datetime.now().isoformat()
@@ -352,8 +363,8 @@ class OperationMemory:
                 user_goal="全选邮件正文"
             )
         """
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO op_records
@@ -383,8 +394,6 @@ class OperationMemory:
                 self._records_since_learn = 0
 
             return record_id
-        finally:
-            conn.close()
 
     def record_sequence(self, records: list[OpRecord]) -> list[int]:
         """记录一段连续操作序列。
@@ -397,9 +406,9 @@ class OperationMemory:
             return []
         import uuid
         seq_id = records[0].sequence_id or str(uuid.uuid4())
-        conn = self._get_conn()
-        ids = []
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
+            ids = []
             for rec in records:
                 rec.sequence_id = seq_id
                 cursor = conn.cursor()
@@ -421,8 +430,6 @@ class OperationMemory:
                 ids.append(cursor.lastrowid)
             conn.commit()
             return ids
-        finally:
-            conn.close()
 
     # ── 模式学习 ─────────────────────────────────────────────────────────────
 
@@ -436,13 +443,11 @@ class OperationMemory:
         3. 相同 action_sequence（标准化 key 顺序）→ 归为同类
         4. frequency ≥ min_frequency → 提升为 pattern
         """
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             rows = conn.execute(
                 "SELECT * FROM op_records ORDER BY timestamp ASC"
             ).fetchall()
-        finally:
-            conn.close()
 
         if not rows:
             return []
@@ -534,11 +539,9 @@ class OperationMemory:
         # ── 步骤4：与既有 pattern 归并（自愈历史脏数据）──────────────────────
         #   相同规范步骤签名（含 app）-> 累加频率、保留既有 name/id，避免重复 pattern。
         #   这样早期以非规范写法（如 "Ctrl+c"）学到的 pattern 会与新学的规范 pattern 自动合并。
-        conn2 = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn2 = self._get_conn()
             existing_rows = conn2.execute("SELECT * FROM op_patterns").fetchall()
-        finally:
-            conn2.close()
 
         existing_by_sig: dict[str, OpPattern] = {}
         for row in existing_rows:
@@ -591,14 +594,12 @@ class OperationMemory:
         Returns:
             匹配度最高的 OpPattern，或 None。
         """
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             rows = conn.execute(
                 "SELECT * FROM op_patterns WHERE app=? ORDER BY confidence DESC, frequency DESC",
                 (current_app,),
             ).fetchall()
-        finally:
-            conn.close()
 
         best: Optional[OpPattern] = None
         best_score = 0.0
@@ -636,8 +637,8 @@ class OperationMemory:
         Returns:
             pattern id（新建时为新增 id，覆盖时为原 id）。
         """
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             # 尝试覆盖已有（按 name）
             cursor = conn.execute(
                 "SELECT id FROM op_patterns WHERE name=?",
@@ -684,8 +685,6 @@ class OperationMemory:
                 pid = cursor.lastrowid
             conn.commit()
             return pid  # type: ignore
-        finally:
-            conn.close()
 
     # ── Pattern → Workflow YAML export ────────────────────────────────────
 
@@ -773,16 +772,14 @@ class OperationMemory:
 
         返回已创建的文件路径列表。
         """
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             threshold = int(self._AUTO_EXPORT_CONFIDENCE_THRESHOLD * 100)
             rows = conn.execute(
                 "SELECT * FROM op_patterns WHERE CAST(confidence * 100 AS INTEGER) >= ?",
                 (threshold,),
             ).fetchall()
             patterns = [OpPattern.from_row(r) for r in rows]
-        finally:
-            conn.close()
 
         exported = []
         for p in patterns:
@@ -795,20 +792,18 @@ class OperationMemory:
 
     def get_pattern(self, name: str) -> Optional[OpPattern]:
         """按名称获取指令包。"""
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             row = conn.execute(
                 "SELECT * FROM op_patterns WHERE name=?",
                 (name,),
             ).fetchone()
             return OpPattern.from_row(row) if row else None
-        finally:
-            conn.close()
 
     def list_patterns(self, app: str = None) -> list[OpPattern]:
         """列出所有或指定应用的指令包。"""
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             if app:
                 rows = conn.execute(
                     "SELECT * FROM op_patterns WHERE app=? ORDER BY frequency DESC",
@@ -819,21 +814,17 @@ class OperationMemory:
                     "SELECT * FROM op_patterns ORDER BY frequency DESC, confidence DESC"
                 ).fetchall()
             return [OpPattern.from_row(r) for r in rows]
-        finally:
-            conn.close()
 
     def delete_pattern(self, name: str) -> bool:
         """删除指定名称的指令包。"""
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             cursor = conn.execute(
                 "DELETE FROM op_patterns WHERE name=?",
                 (name,),
             )
             conn.commit()
             return cursor.rowcount > 0
-        finally:
-            conn.close()
 
     def execute_pattern(
         self,
@@ -908,8 +899,8 @@ class OperationMemory:
 
         # 更新 pattern 使用统计
         if results:
-            conn = self._get_conn()
-            try:
+            with self._conn_lock:
+                conn = self._get_conn()
                 conn.execute("""
                     UPDATE op_patterns
                     SET frequency = frequency + 1,
@@ -917,8 +908,6 @@ class OperationMemory:
                     WHERE name=?
                 """, (self._now_iso(), pattern.name))
                 conn.commit()
-            finally:
-                conn.close()
 
         return results
 
@@ -999,8 +988,8 @@ class OperationMemory:
         limit: int = 100,
     ) -> list[OpRecord]:
         """获取最近记录（调试用）。"""
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             if app:
                 rows = conn.execute(
                     "SELECT * FROM op_records WHERE app=? ORDER BY timestamp DESC LIMIT ?",
@@ -1012,17 +1001,23 @@ class OperationMemory:
                     (limit,),
                 ).fetchall()
             return [self._row_to_record(r) for r in rows]
-        finally:
-            conn.close()
 
     def clear_all_records(self) -> None:
         """清除所有操作记录（谨慎使用）。"""
-        conn = self._get_conn()
-        try:
+        with self._conn_lock:
+            conn = self._get_conn()
             conn.execute("DELETE FROM op_records")
             conn.commit()
-        finally:
-            conn.close()
+
+    def close(self) -> None:
+        """显式关闭单例连接（可选；进程退出时 SQLite 也会自动释放）。"""
+        with self._conn_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def export_patterns_json(self) -> str:
         """导出所有 pattern 为 JSON 字符串。"""
