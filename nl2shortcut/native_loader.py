@@ -103,6 +103,39 @@ class _NativeDLL:
         except AttributeError:
             pass
 
+        # ── uia_diff ────────────────────────────────────────────
+        # const char* uia_diff(const char* before_json, const char* after_json);
+        # 同样用 c_void_p 返回原始指针。
+        try:
+            fn = self._dll.uia_diff
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            fn.restype = ctypes.c_void_p
+        except AttributeError:
+            pass
+
+        # ── uia_diff_filtered ──────────────────────────────────
+        # const char* uia_diff_filtered(const char* before, const char* after,
+        #                               int filter_flags, int position_tolerance_px);
+        try:
+            fn = self._dll.uia_diff_filtered
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                           ctypes.c_int, ctypes.c_int]
+            fn.restype = ctypes.c_void_p
+        except AttributeError:
+            pass
+
+        # ── execute_with_retry ─────────────────────────────────
+        # const char* execute_with_retry(const char* candidates_json,
+        #                                int verify_delay_ms, int max_attempts,
+        #                                int use_clipboard_check, int use_window_check);
+        try:
+            fn = self._dll.execute_with_retry
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_int, ctypes.c_int]
+            fn.restype = ctypes.c_void_p
+        except AttributeError:
+            pass
+
         # ── send_hotkey ──────────────────────────────────────────
         # int send_hotkey(const char* key_combination);
         try:
@@ -329,6 +362,128 @@ class _NativeDLL:
             raw = ctypes.cast(ptr, ctypes.c_char_p).value
             result = json.loads(raw.decode("utf-8")) if raw else None
             # 释放 C++ 分配的内存
+            self._dll.free_result(ptr)
+            return result
+        except Exception:
+            return None
+
+    def uia_diff(self, before_json: str, after_json: str) -> Optional[Dict[str, Any]]:
+        """对比两棵 UIA 树 JSON 快照，返回节点级 diff（不过滤任何差异）。
+
+        若需要自动过滤焦点变化/位置抖动/元字段差异，请改用 uia_diff_filtered()。
+
+        Args:
+            before_json: uia_snapshot() 返回的 JSON 字符串（注入前）
+            after_json:  uia_snapshot() 返回的 JSON 字符串（注入后）
+        Returns:
+            {"changed":[...], "added":[...], "removed":[...], "summary":{...}}
+            失败返回 None。
+        """
+        if self._dll is None:
+            return None
+        try:
+            ptr = self._dll.uia_diff(
+                before_json.encode("utf-8"),
+                after_json.encode("utf-8"),
+            )
+            if not ptr:
+                return None
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            result = json.loads(raw.decode("utf-8")) if raw else None
+            self._dll.free_result(ptr)
+            return result
+        except Exception:
+            return None
+
+    # 过滤标志位（与 native_core/src/uia.h 的 UIA_FILTER_* enum 保持一致）
+    UIA_FILTER_FOCUS_STATE = 0x01   # 忽略 state 中 focused/focusable 相关变化
+    UIA_FILTER_POSITION_PX = 0x02   # 忽略位置/尺寸变化 < position_tolerance 像素
+    UIA_FILTER_META_FIELDS = 0x04   # 忽略 elapsed_ms / focus 顶层元信息字段
+    UIA_FILTER_ALL         = 0xFF   # 启用全部非关键过滤（推荐默认）
+
+    def uia_diff_filtered(
+        self,
+        before_json: str,
+        after_json: str,
+        filter_flags: int = UIA_FILTER_ALL,
+        position_tolerance_px: int = 10,
+    ) -> Optional[Dict[str, Any]]:
+        """带过滤器的 UIA diff（推荐用于真实窗口对比）。
+
+        自动过滤三类常见的非关键状态差异：
+          1. 焦点状态差异（UIA_FILTER_FOCUS_STATE，默认开）
+             只在两次采集间焦点在不同控件间转移/变为 focused 的变化；
+          2. 位置尺寸抖动（UIA_FILTER_POSITION_PX，默认开，容忍 < 10px）
+             窗口 resize/位置微调引起的 1px~10px 尺寸或位置差异；
+          3. 快照元字段（UIA_FILTER_META_FIELDS，默认开）
+             elapsed_ms / focus 顶层字段（非树外元信息，不在子节点内）。
+
+        Args:
+            before_json: uia_snapshot() 返回的 JSON 字符串
+            after_json:  uia_snapshot() 返回的 JSON 字符串
+            filter_flags: 过滤位掩码，UIA_FILTER_* 组合（默认全部启用）
+            position_tolerance_px: 位置/尺寸容忍像素阈值（默认 10）
+        Returns:
+            summary 额外包含 filtered_focus/filtered_position/filtered_meta 统计
+            失败返回 None。
+        """
+        if self._dll is None:
+            return None
+        try:
+            ptr = self._dll.uia_diff_filtered(
+                before_json.encode("utf-8"),
+                after_json.encode("utf-8"),
+                int(filter_flags),
+                int(position_tolerance_px),
+            )
+            if not ptr:
+                return None
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            result = json.loads(raw.decode("utf-8")) if raw else None
+            self._dll.free_result(ptr)
+            return result
+        except Exception:
+            return None
+
+    def execute_with_retry(
+        self,
+        candidates: list,
+        verify_delay_ms: int = 100,
+        max_attempts: int = 3,
+        use_clipboard_check: bool = False,
+        use_window_check: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """C++ 执行内核：候选键构建 + 执行循环 + 验证 + 重试整体下沉到 C++。
+
+        Args:
+            candidates: 候选键列表，如 ["Ctrl+C", "Ctrl+Insert"]
+            verify_delay_ms: 每次注入后的验证等待时间（毫秒）
+            max_attempts: 最大重试次数（含首次）
+            use_clipboard_check: 启用剪贴板验证
+            use_window_check: 启用前台窗口验证
+        Returns:
+            {
+              "success": bool, "used_key": str, "attempts": int,
+              "error": str|None, "elapsed_ms": float,
+              "verifications": [{"key","attempt","verified","reason"}]
+            }
+            失败返回 None（DLL 不可用）。
+        """
+        if self._dll is None:
+            return None
+        try:
+            candidates_json = json.dumps(candidates, ensure_ascii=False)
+            ptr = self._dll.execute_with_retry(
+                candidates_json.encode("utf-8"),
+                int(verify_delay_ms),
+                int(max_attempts),
+                1 if use_clipboard_check else 0,
+                1 if use_window_check else 0,
+            )
+            if not ptr:
+                return None
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            result = json.loads(raw.decode("utf-8")) if raw else None
             self._dll.free_result(ptr)
             return result
         except Exception:

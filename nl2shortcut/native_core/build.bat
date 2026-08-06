@@ -74,12 +74,14 @@ if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 set "DLL_SRC=%OUT_DIR%\nl2shortcut_native.dll"
 cl.exe /nologo /std:c++17 /O2 /MT /LD /EHsc /Fe:"%DLL_SRC%" ^
     "%SRC_DIR%src\uia.cpp" ^
+    "%SRC_DIR%src\uia_diff.cpp" ^
     "%SRC_DIR%src\inject.cpp" ^
     "%SRC_DIR%src\window.cpp" ^
     "%SRC_DIR%src\fuzzy_match.cpp" ^
     "%SRC_DIR%src\scache.cpp" ^
     "%SRC_DIR%src\context_proc.cpp" ^
     "%SRC_DIR%src\pattern_cluster.cpp" ^
+    "%SRC_DIR%src\executor.cpp" ^
     /link ole32.lib oleaut32.lib user32.lib kernel32.lib
 if %errorlevel% neq 0 (
     echo [ERROR] Direct compile failed.

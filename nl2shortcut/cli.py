@@ -1,4 +1,4 @@
-﻿"""CLI entry point for nl2shortcut."""
+"""CLI entry point for nl2shortcut."""
 
 import sys
 import time
@@ -641,7 +641,15 @@ def cmd_workflow(master, args) -> int:
 
 
 def _cmd_workflow_create(master, args) -> int:
-    """Create a YAML workflow from natural language description via LLM."""
+    """Create a YAML workflow from natural language description via LLM.
+
+    流程：用户几句话 → LLM 拆步 → 兼容映射 → 生成可回放的 YAML。
+    生成的 YAML 与 GoalPlanner.execute_plan 的执行语义一致，可立即用
+    `nl2shortcut workflow run <name>` 回放。
+    """
+    from pathlib import Path
+    from .planner import plan_to_workflow
+
     description = " ".join(args.description)
     dry_run = getattr(args, "dry_run", False)
     wf_name = getattr(args, "name", None) or ""
@@ -654,88 +662,91 @@ def _cmd_workflow_create(master, args) -> int:
         print("❌ LLM 无法分解此描述。请尝试更具体的描述。")
         return 1
 
+    # 如果用户指定了 name，临时覆盖 plan.goal，让 plan_to_workflow 用它做文件名
+    if wf_name:
+        plan_result.goal = wf_name
+
+    # 2. 预览拆解结果
     print(f"📋 LLM 分解为 {len(plan_result.steps)} 步：")
-    for i, s in enumerate(plan_result.steps):
-        icon = {"shortcut": "⌨️", "wait": "⏱️", "type": "⌨️", "shell": "💻"}.get(s.action, "•")
-        detail = s.key_combination or f"{s.text or ''}" or f"{s.composite_hint or ''}"
-        print(f"  {i+1}. {icon} {s.action}: {detail}")
+    _DIRECTION_KEY = {"tab": "Tab", "shift_tab": "Shift+Tab",
+                      "left": "Left", "right": "Right", "up": "Up", "down": "Down"}
+    preview_count = 0
+    for s in plan_result.steps:
+        if s.action == "shortcut":
+            detail, icon = s.key_combination, "⌨️"
+            preview_count += 1
+        elif s.action == "type":
+            detail, icon = (s.text[:30] + "…" if len(s.text) > 30 else s.text), "⌦"
+            preview_count += 1
+        elif s.action == "tab":
+            key = _DIRECTION_KEY.get(s.direction, "Tab")
+            detail = f"{key} x{s.n}" if s.n > 1 else key
+            icon = "⇥"
+            preview_count += s.n  # tab 会被拆成 n 个 shortcut step
+        elif s.action == "shell":
+            detail, icon = (s.command or "")[:50], "⚡"
+            preview_count += 1
+        elif s.action == "wait":
+            detail, icon = f"{s.wait_ms}ms", "⏱️"
+            preview_count += 1
+        elif s.action == "composite":
+            detail = f"[需视觉介入] {s.composite_hint[:40]}"
+            icon = "🔍"
+            preview_count += 1
+        else:
+            detail, icon = s.description[:40], "•"
+            preview_count += 1
+        print(f"  {icon} {s.description}")
+        if detail:
+            print(f"       └ {detail}")
+    print(f"\n  → 将生成 {preview_count} 个 YAML 步骤")
 
     if dry_run:
         print("\n⚠️  dry-run 模式，未保存。")
         return 0
 
-    # 2. Convert LLM plan steps to workflow YAML
-    import yaml
-    from pathlib import Path
-
-    # Auto-generate name from description
+    # 3. 调用 planner.plan_to_workflow 生成 YAML
+    #    该函数已处理 tab→shortcut 拆步、composite→shell 占位等兼容映射
     if not wf_name:
+        # plan_to_workflow 会自动从 goal 提取文件名
+        pass
+
+    saved_path = plan_to_workflow(plan_result, overwrite=False)
+
+    if saved_path is None:
+        # 可能是文件已存在或 steps 为空
         import re
-        wf_name = description.lower()
-        wf_name = re.sub(r'[^\w\s-]', '', wf_name)
-        wf_name = re.sub(r'[-\s]+', '-', wf_name).strip('-')
-        if len(wf_name) > 40:
-            wf_name = wf_name[:40].rstrip('-')
-
-    wf_dir = Path.home() / ".nl2shortcut" / "workflows"
-    wf_dir.mkdir(parents=True, exist_ok=True)
-    filepath = wf_dir / f"{wf_name}.yaml"
-
-    if filepath.exists():
-        print(f"\n⚠️  工作流 '{wf_name}' 已存在。使用 --name 指定其他名称。")
+        safe = re.sub(r'[^\u4e00-\u9fff\w\s]', '', plan_result.goal.strip())
+        safe = re.sub(r'\s+', '_', safe)[:40] or "auto_workflow"
+        filepath = Path.home() / ".nl2shortcut" / "workflows" / f"{safe}.yaml"
+        if filepath.exists():
+            print(f"\n⚠️  工作流已存在：{filepath.name}")
+            print(f"   使用 --name 指定其他名称，或先删除旧文件。")
+        else:
+            print(f"\n❌ 生成失败（plan 无有效步骤？）")
         return 1
 
-    # Map PlanStep to workflow step
-    wf_steps = []
-    for i, s in enumerate(plan_result.steps):
-        if s.action == "shortcut":
-            cmd = s.key_combination
-            act = "shortcut"
-        elif s.action == "wait":
-            cmd = str(s.wait_ms / 1000.0 if s.wait_ms > 0 else 1)
-            act = "wait"
-        elif s.action == "type":
-            cmd = s.text or ""
-            act = "type"
-        elif s.action == "shell":
-            cmd = s.key_combination or s.composite_hint or ""
-            act = "shell"
-        else:
-            cmd = str(s.key_combination or s.composite_hint or "")
-            act = "shortcut"
-        step_name = s.description or f"Step {i+1}"
-        wf_steps.append({"name": step_name, "action": act, "command": cmd})
-
-    doc = {
-        "name": wf_name,
-        "description": description,
-        "version": "1.0",
-        "variables": {},
-        "steps": wf_steps,
-    }
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(f"# Auto-generated from: '{description}'\n")
-        yaml.dump(doc, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-
-    print(f"\n✅ 工作流已创建：{filepath}")
+    print(f"\n✅ 工作流已保存：{saved_path}")
+    print(f"   名称：{Path(saved_path).stem}")
 
     # --run: execute immediately
     if getattr(args, "run", False):
         print(f"\n🚀 正在执行...")
         from .workflow import WorkflowEngine
         engine = WorkflowEngine(master.agent)
-        result = engine.run(wf_name, dry_run=False)
+        result = engine.run(Path(saved_path).stem, dry_run=False)
         if result.success:
             print(f"✅ 执行完成（{len(result.steps)} 步，{result.total_duration_ms:.0f}ms）")
             for s in result.steps:
                 icon = "✅" if s.success else "❌"
-                print(f"  {icon} {s.step_name}: {s.output[:50]}")
+                out = s.output[:50] if s.output else ""
+                print(f"  {icon} {s.step_name}: {out}")
         else:
             print(f"❌ 执行失败：{result.error}")
             return 1
     else:
-        print(f"   运行：nl2shortcut workflow run {wf_name}")
+        print(f"   预览：nl2shortcut workflow run {Path(saved_path).stem} --dry-run")
+        print(f"   执行：nl2shortcut workflow run {Path(saved_path).stem}")
     return 0
 
 

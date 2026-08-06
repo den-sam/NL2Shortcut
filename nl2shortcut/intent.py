@@ -8,12 +8,41 @@
 5. spaCy 语义匹配（可选，需安装 spacy 模型）
 """
 
+import os
 import re
 import difflib
+import logging
 from typing import Optional
 
 from .models import IntentResult
 from .database import DatabaseManager
+
+# 调试日志：设置环境变量 NL2SHORTCUT_DEBUG=1 启用
+_log = logging.getLogger(__name__)
+if os.environ.get("NL2SHORTCUT_DEBUG"):
+    _log.setLevel(logging.DEBUG)
+else:
+    _log.setLevel(logging.WARNING)  # 显式禁用 DEBUG，防止 root logger 配置泄漏
+
+# 优先用 rapidfuzz（C++ 实现，10-100x 更快），未安装则回退到 difflib
+try:
+    from rapidfuzz.distance import Indel
+    _HAS_RAPIDFUZZ = True
+
+    def _fuzzy_ratio(a: str, b: str) -> float:
+        """rapidfuzz 归一化相似度（基于 Indel 距离，与 difflib.SequenceMatcher.ratio 等价）。"""
+        if not a or not b:
+            return 0.0
+        # rapidfuzz 的 normalized_similarity 返回 0.0-1.0
+        return Indel.normalized_similarity(a, b)
+except ImportError:
+    _HAS_RAPIDFUZZ = False
+
+    def _fuzzy_ratio(a: str, b: str) -> float:
+        """difflib 回退路径（Python 纯实现，较慢）。"""
+        if not a or not b:
+            return 0.0
+        return difflib.SequenceMatcher(None, a, b).ratio()
 
 
 
@@ -416,16 +445,19 @@ class IntentEngine:
         """主入口：从自然语言识别意图。"""
         original = text.strip()
         if not original:
+            _log.debug("[Intent] 空输入，返回 unknown")
             return IntentResult(intent="unknown", command="", confidence=0.0)
 
         # ── 终端打开检测 —— 在关键字匹配之前 ──
         iso = self._try_terminal_open(original)
         if iso is not None:
+            _log.debug("[Intent] 终端打开命中 text=%r cmd=%s", original, iso.command)
             return iso
 
         # ── 组合（文件复制 / 移动）检测 —— 在关键字层之前 ──
         comp = self._try_composite(original)
         if comp is not None:
+            _log.debug("[Intent] 组合操作命中 text=%r cmd=%s", original, comp.command)
             return comp
 
         # ── 打开应用程序检测 —— 在组合检测之后 ──
@@ -433,6 +465,7 @@ class IntentEngine:
         # 此处仅处理通用"打开X"（X 为应用名）→ 统一开始菜单搜索流程。
         oap = self._try_open_app(original)
         if oap is not None:
+            _log.debug("[Intent] 打开应用命中 text=%r cmd=%s", original, oap.command)
             return oap
 
         cleaned = self._clean_text(original)
@@ -440,29 +473,35 @@ class IntentEngine:
         # 第 1 层：直接关键字匹配
         result = self._keyword_match(cleaned)
         if result and result.confidence >= self.EXACT_THRESHOLD:
+            _log.debug("[Intent] L1 关键字命中 text=%r cmd=%s conf=%.3f", original, result.command, result.confidence)
             return result
 
         # 第 2 层：数据库同义词
         result = self._synonym_match(cleaned)
         if result and result.confidence >= self.SYNONYM_THRESHOLD:
+            _log.debug("[Intent] L2 同义词命中 text=%r cmd=%s conf=%.3f", original, result.command, result.confidence)
             return result
 
         # 第 3 层：包含匹配
         result = self._contains_match(cleaned)
         if result and result.confidence >= self.CONTAINS_THRESHOLD:
+            _log.debug("[Intent] L3 子串命中 text=%r cmd=%s conf=%.3f", original, result.command, result.confidence)
             return result
 
         # 第 4 层：模糊匹配
         result = self._fuzzy_match(cleaned)
         if result and result.confidence >= self.FUZZY_THRESHOLD:
+            _log.debug("[Intent] L4 模糊命中 text=%r cmd=%s conf=%.3f", original, result.command, result.confidence)
             return result
 
         # 第 5 层：spaCy 语义匹配（若可用）
         if self._nlp_available:
             result = self._spacy_match(original)
             if result and result.confidence >= self.MIN_CONFIDENCE:
+                _log.debug("[Intent] L5 spaCy命中 text=%r cmd=%s conf=%.3f", original, result.command, result.confidence)
                 return result
 
+        _log.debug("[Intent] 5层瀑布全部未命中 text=%r（返回 unknown）", original)
         return (
             result if result
             else IntentResult(intent="unknown", command="", confidence=0.0)
@@ -511,7 +550,9 @@ class IntentEngine:
             return None
         app_name = m.group(1).strip()
         if not app_name or app_name in self._OPEN_APP_EXCLUDES:
+            _log.debug("[Intent] 打开应用被排除 app=%r（在 _OPEN_APP_EXCLUDES 中）", app_name)
             return None
+        _log.debug("[Intent] 打开应用生成计划 app=%r", app_name)
         from .composites import make_open_app
         plan = make_open_app(app_name=app_name)
         return IntentResult(
@@ -716,7 +757,7 @@ class IntentEngine:
             for w in words:
                 if len(w) < 2:
                     continue
-                ratio = difflib.SequenceMatcher(None, w, kw).ratio()
+                ratio = _fuzzy_ratio(w, kw)
                 if ratio >= 0.7 and ratio * 0.85 > best_score:
                     best_score = ratio * 0.85
                     best_cmd = cmd
@@ -726,17 +767,19 @@ class IntentEngine:
             for w in words:
                 if len(w) < 2:
                     continue
-                ratio = difflib.SequenceMatcher(None, w, s.command).ratio()
+                ratio = _fuzzy_ratio(w, s.command)
                 if ratio >= 0.7 and ratio * 0.80 > best_score:
                     best_score = ratio * 0.80
                     best_cmd = s.command
                     best_desc = s.description
 
         if best_cmd and best_score >= self.FUZZY_THRESHOLD:
+            _log.debug("[Intent] fuzzy 匹配成功 text=%r cmd=%s score=%.3f kw=%s", text, best_cmd, best_score, best_desc)
             return IntentResult(
                 intent=best_cmd, command=best_cmd,
                 confidence=best_score, matched_keyword=best_desc
             )
+        _log.debug("[Intent] fuzzy 未达阈值 text=%r best_cmd=%s score=%.3f", text, best_cmd, best_score)
         return None
 
     def _spacy_match(self, text: str) -> Optional[IntentResult]:

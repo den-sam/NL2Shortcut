@@ -1,4 +1,4 @@
-﻿"""日志记录与统计模块。
+"""日志记录与统计模块。
 
 审计日志格式（JSON Lines, append-only）已按照等保 2.0 三级要求预留字段：
   - user_id        : 操作人标识（默认 "local_user"）
@@ -7,17 +7,30 @@
   - compliance_level: 合规等级（默认 "baseline"）
   - operation_type : 操作类型（默认 "shortcut_exec"）
   - target_resource: 目标资源（默认 ""）
+
+─── 链式哈希审计（ChainHash Audit）──────────────────────────────────
+每条日志记录携带两个哈希字段，形成防篡改链：
+
+  prev_hash : 上一条记录的 this_hash（创世记录为 64 个 "0"）
+  this_hash : SHA256(prev_hash || canonical_json(record_without_hash_fields))
+
+任何对历史记录的篡改都会导致后续所有记录的 this_hash 校验失败。
+调用 verify_chain() 可校验整条链的完整性，detect_tamper() 返回首个断裂点。
 """
 
 import json
 import time
 import socket
 import uuid
+import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, List
 
 from .models import ExecutionResult, Stats
+
+# 创世哈希：链首的 prev_hash 固定值
+_GENESIS_HASH = "0" * 64
 
 
 class Logger:
@@ -25,6 +38,8 @@ class Logger:
 
     所有执行事件以 JSON Lines 追加写入每日滚动日志文件。
     每条记录携带等保合规预留字段，可在运行时通过 set_compliance_context() 设置。
+
+    链式哈希：每条记录的 this_hash 依赖上一条的 this_hash，形成防篡改链。
     """
 
     def __init__(self, log_dir: Optional[Path] = None):
@@ -43,6 +58,13 @@ class Logger:
             "source_ip": "127.0.0.1",
             "compliance_level": "baseline",
         }
+
+        # ── 链式哈希状态 ──
+        # _chain_head 保存最后一条写入记录的 this_hash。
+        # 启动时从当日日志文件恢复，确保跨进程重启后链连续。
+        self._chain_head: str = _GENESIS_HASH
+        self._chain_seq: int = 0
+        self._recover_chain_head()
 
     # ── 等保合规上下文管理 ────────────────────────────────────────
 
@@ -81,6 +103,119 @@ class Logger:
             "compliance_level": self._compliance_ctx["compliance_level"],
         }
 
+    # ── 链式哈希核心 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_hash(prev_hash: str, record: dict) -> str:
+        """计算链式哈希：this_hash = SHA256(prev_hash || canonical_json(record))。
+
+        record 应为不含 prev_hash/this_hash 字段的业务记录。
+        canonical_json 通过 sorted keys 保证序列化确定性。
+        """
+        canonical = json.dumps(record, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"))
+        raw = prev_hash + canonical
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _recover_chain_head(self) -> None:
+        """从当日日志文件恢复链头（跨进程重启后链连续）。
+
+        读取最后一行的 this_hash 作为 _chain_head，并设置 _chain_seq。
+        若文件不存在或为空，保持创世哈希。
+        """
+        try:
+            log_file = self._log_file()
+            if not log_file.exists():
+                return
+            # 只读尾部 4KB，切出最后一行（避免大文件全量读取）
+            with open(log_file, "rb") as f:
+                f.seek(0, 2)  # SEEK_END
+                size = f.tell()
+                if size == 0:
+                    return
+                tail_size = min(size, 4096)
+                f.seek(size - tail_size)
+                tail = f.read(tail_size)
+            # 切最后一个非空行
+            lines = tail.decode("utf-8", errors="ignore").splitlines()
+            line = ""
+            for ln in reversed(lines):
+                if ln.strip():
+                    line = ln.strip()
+                    break
+            if not line:
+                return
+            entry = json.loads(line)
+            this_hash = entry.get("this_hash")
+            seq = entry.get("seq", 0)
+            if isinstance(this_hash, str) and len(this_hash) == 64:
+                self._chain_head = this_hash
+                self._chain_seq = int(seq) if isinstance(seq, int) else 0
+        except Exception:
+            # 恢复失败保持创世哈希，不影响主流程
+            pass
+
+    def verify_chain(self, log_file: Optional[Path] = None) -> bool:
+        """校验日志链完整性。所有记录的 this_hash 重新计算后必须一致。
+
+        Args:
+            log_file: 指定日志文件；默认当日文件。
+        Returns:
+            True 表示链完整无篡改。
+        """
+        target = log_file or self._log_file()
+        if not target.exists():
+            return True
+        prev = _GENESIS_HASH
+        try:
+            with open(target, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    this_hash = entry.get("this_hash")
+                    prev_hash = entry.get("prev_hash")
+                    if not isinstance(this_hash, str) or prev_hash != prev:
+                        return False
+                    # 重算 this_hash（剔除哈希字段）
+                    record = {k: v for k, v in entry.items()
+                              if k not in ("this_hash", "prev_hash")}
+                    expected = self._compute_hash(prev, record)
+                    if expected != this_hash:
+                        return False
+                    prev = this_hash
+            return True
+        except Exception:
+            return False
+
+    def detect_tamper(self, log_file: Optional[Path] = None) -> Optional[int]:
+        """返回首个断裂点的行号（1-based）；链完整返回 None。"""
+        target = log_file or self._log_file()
+        if not target.exists():
+            return None
+        prev = _GENESIS_HASH
+        try:
+            with open(target, encoding="utf-8") as f:
+                for lineno, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    this_hash = entry.get("this_hash")
+                    prev_hash = entry.get("prev_hash")
+                    if not isinstance(this_hash, str) or prev_hash != prev:
+                        return lineno
+                    record = {k: v for k, v in entry.items()
+                              if k not in ("this_hash", "prev_hash")}
+                    expected = self._compute_hash(prev, record)
+                    if expected != this_hash:
+                        return lineno
+                    prev = this_hash
+            return None
+        except Exception:
+            return None
+
     # ── 日志文件 ──────────────────────────────────────────────────
 
     def _log_file(self) -> Path:
@@ -88,9 +223,11 @@ class Logger:
         return self.log_dir / f"scut_{date_str}.log"
 
     def log_execution(self, result: ExecutionResult) -> None:
-        entry = {
+        # 构建业务记录（不含哈希字段）
+        record = {
             # 时间与身份
             "timestamp": datetime.now().isoformat(),
+            "seq": self._chain_seq + 1,
             # 操作内容
             "intent": result.intent,
             "command": result.command,
@@ -106,8 +243,18 @@ class Logger:
             # 等保合规字段（预留）
             **self._build_compliance_block(),
         }
+        # 计算链式哈希
+        this_hash = self._compute_hash(self._chain_head, record)
+        entry = dict(record)
+        entry["prev_hash"] = self._chain_head
+        entry["this_hash"] = this_hash
+
         with open(self._log_file(), "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        # 更新链头
+        self._chain_head = this_hash
+        self._chain_seq += 1
 
         if result.success:
             self._consecutive_failures = 0

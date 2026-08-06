@@ -1,0 +1,288 @@
+{
+  "host": "127.0.0.1",
+  "port": 7770,
+  "ok": true,
+  "passed": 34,
+  "failed": 0,
+  "total": 34,
+  "runtime_s": 2.745,
+  "generated_at": "2026-07-25 16:25:05",
+  "tests": [
+    {
+      "name": "import: nl2shortcut.intent",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.composites",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.selfcheck",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.agent",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.agent_api",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.tiers",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.planner",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.vision_executor",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.api_executor",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.workflow",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.operation_memory",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.adapter",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.models",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.database",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.cli",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "import: nl2shortcut.self_test",
+      "category": "import",
+      "ok": true,
+      "message": "ok",
+      "detail": {}
+    },
+    {
+      "name": "识别: 复制",
+      "category": "recognize",
+      "ok": true,
+      "message": "command='copy', confidence=0.95",
+      "detail": {
+        "command": "copy",
+        "confidence": 0.95
+      }
+    },
+    {
+      "name": "识别: 保存",
+      "category": "recognize",
+      "ok": true,
+      "message": "command='save', confidence=0.95",
+      "detail": {
+        "command": "save",
+        "confidence": 0.95
+      }
+    },
+    {
+      "name": "识别: 把报告复制文件到桌面",
+      "category": "recognize",
+      "ok": true,
+      "message": "composite, steps=1",
+      "detail": {
+        "steps": 1
+      }
+    },
+    {
+      "name": "识别: 复制到桌面",
+      "category": "recognize",
+      "ok": true,
+      "message": "composite, steps=1",
+      "detail": {
+        "steps": 1
+      }
+    },
+    {
+      "name": "识别: 把文件移动到下载",
+      "category": "recognize",
+      "ok": true,
+      "message": "composite, steps=1",
+      "detail": {
+        "steps": 1
+      }
+    },
+    {
+      "name": "执行(dry-run): 复制",
+      "category": "execute",
+      "ok": true,
+      "message": "mode=, success=True",
+      "detail": {
+        "mode": ""
+      }
+    },
+    {
+      "name": "执行(dry-run): 把报告复制文件到桌面",
+      "category": "execute",
+      "ok": true,
+      "message": "mode=composite, success=True",
+      "detail": {
+        "mode": "composite"
+      }
+    },
+    {
+      "name": "工厂: _resolve_dest_folder 路径解析",
+      "category": "composite",
+      "ok": true,
+      "message": "桌面→C:\\Users\\Deng2\\Desktop | 下载→C:\\Users\\Deng2\\Downloads",
+      "detail": {}
+    },
+    {
+      "name": "工厂: make_copy_to_folder 步骤结构",
+      "category": "composite",
+      "ok": true,
+      "message": "steps=5, last=Enter, cmd_open=True, command=True, key_seq=['Win+R', 'Enter', 'Enter']",
+      "detail": {
+        "n": 5,
+        "kinds": [
+          "key",
+          "type"
+        ]
+      }
+    },
+    {
+      "name": "工厂: make_move_to_folder 步骤结构",
+      "category": "composite",
+      "ok": true,
+      "message": "steps=5, last=Enter, cmd_open=True, command=True, key_seq=['Win+R', 'Enter', 'Enter']",
+      "detail": {
+        "n": 5,
+        "kinds": [
+          "key",
+          "type"
+        ]
+      }
+    },
+    {
+      "name": "工厂: make_find_and_copy 步骤结构",
+      "category": "composite",
+      "ok": true,
+      "message": "steps=13, typed_folder=True, typed_filename=True, key_seq=['Win+E', 'Alt+D', 'Ctrl+A', 'Enter', 'Ctrl+E', 'Enter', 'Space', 'Ctrl+C']",
+      "detail": {
+        "n": 13,
+        "kinds": [
+          "key",
+          "type",
+          "wait"
+        ]
+      }
+    },
+    {
+      "name": "时序: 复制/移动工作流不含任何 wait 步骤(已删除等待)",
+      "category": "timing",
+      "ok": true,
+      "message": "copy_wait=False, move_wait=False",
+      "detail": {}
+    },
+    {
+      "name": "时序: wait 步骤真实休眠(非 dry-run)",
+      "category": "timing",
+      "ok": true,
+      "message": "配置 1500ms, 实测 1501ms, success=True",
+      "detail": {
+        "configured_ms": 1500,
+        "elapsed_ms": 1500.6
+      }
+    },
+    {
+      "name": "原语: keyboard_primitives 结构",
+      "category": "primitives",
+      "ok": true,
+      "message": "classes=['PrimitiveResult', 'KeyboardPrimitives'], methods=28",
+      "detail": {}
+    },
+    {
+      "name": "自检: _resolve_check copy→clipboard",
+      "category": "selfcheck",
+      "ok": true,
+      "message": "check=clipboard",
+      "detail": {}
+    },
+    {
+      "name": "自检: _resolve_check undo→noop",
+      "category": "selfcheck",
+      "ok": true,
+      "message": "check=noop",
+      "detail": {}
+    },
+    {
+      "name": "自检: _resolve_check 终端paste→noop",
+      "category": "selfcheck",
+      "ok": true,
+      "message": "check=noop",
+      "detail": {}
+    },
+    {
+      "name": "自检: snapshot 安全调用",
+      "category": "selfcheck",
+      "ok": true,
+      "message": "check=clipboard",
+      "detail": {}
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-﻿"""nl2shortcut 数据模型。"""
+"""nl2shortcut 数据模型。"""
 
 from __future__ import annotations
 
@@ -144,12 +144,23 @@ class WorkflowStep:
     """工作流中的单个步骤。"""
     name: str
     action: str  # "shortcut" | "shell" | "http" | "file" | "python" | "wait" | "condition"
+                   # | "click_element"  (UI 元素定位，第3步)
     command: str = ""
     args: dict = field(default_factory=dict)
     capture: str = ""  # variable name to capture output
     condition: str = ""  # Python expression, step only runs if truthy
     retry: int = 0
     timeout: float = 10.0
+    # ── 第2步：循环结构 ────────────────────────────────────────────
+    # loop 为空时单次执行；非空时按表达式求值结果迭代。
+    # 支持：
+    #   - "range(5)"            → 固定次数循环
+    #   - "range(1, 10)"       → 带起始的 range
+    #   - "ctx['rows']"         → 遍历上下文变量（list/tuple）
+    #   - "while expr"          → while 循环（expr 是 Python 表达式）
+    #                              while 循环有最大次数保护（_MAX_LOOP_ITER）
+    loop: str = ""
+    loop_var: str = "item"  # 循环变量名，在循环体内可通过 $loop_var 或 ctx[loop_var] 访问
 
 
 @dataclass

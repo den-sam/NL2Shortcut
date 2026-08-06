@@ -259,6 +259,87 @@ def snapshot(command: str, file_path: Optional[str] = None,
     return snap
 
 
+# ── UIA 树 diff 验证（可选高级验证，需要 native DLL 支持） ──────────
+
+def uia_snapshot_native() -> Optional[str]:
+    """通过 C++ 原生层采集 UIA 树 JSON。返回 JSON 字符串，失败返回 None。"""
+    try:
+        from .native_loader import native
+        if not native.available:
+            return None
+        import json as _json
+        snap = native.uia_snapshot(max_depth=8, max_nodes=200)
+        if snap is None:
+            return None
+        return _json.dumps(snap, ensure_ascii=False)
+    except Exception:
+        return None
+
+
+def uia_diff_check(before_json: str, after_json: str,
+                   use_filter: bool = True,
+                   position_tolerance_px: int = 10,
+                   ) -> Dict[str, Any]:
+    """对比两棵 UIA 树，返回结构化 diff 结果（默认启用非关键差异过滤）。
+
+    用于在 selfcheck 标量检查之外做更精细的 UI 变化验证。
+    需要 C++ 原生层支持；不可用时返回 unknown。
+
+    Args:
+        before_json: 注入前 UIA 快照
+        after_json:  注入后 UIA 快照
+        use_filter:  是否启用非关键差异过滤（焦点/位置/元字段），默认 True
+        position_tolerance_px: 位置抖动容忍像素（默认 10，use_filter=True 时生效）
+
+    Returns:
+        {
+          "ok": True/False/None,    # None = 无法判断
+          "changed": N, "added": N, "removed": N,
+          "filtered_focus": N, "filtered_position": N, "filtered_meta": N,  # 过滤统计
+          "details": {...},         # 完整 diff 结构
+          "message": "..."
+        }
+    """
+    try:
+        from .native_loader import native
+        if not native.available:
+            return {"ok": None, "changed": 0, "added": 0, "removed": 0,
+                    "filtered_focus": 0, "filtered_position": 0, "filtered_meta": 0,
+                    "details": None, "message": "native DLL 不可用"}
+        if use_filter:
+            flags = native.UIA_FILTER_ALL
+            diff = native.uia_diff_filtered(
+                before_json, after_json,
+                filter_flags=flags,
+                position_tolerance_px=position_tolerance_px,
+            )
+        else:
+            diff = native.uia_diff(before_json, after_json)
+        if diff is None:
+            return {"ok": None, "changed": 0, "added": 0, "removed": 0,
+                    "filtered_focus": 0, "filtered_position": 0, "filtered_meta": 0,
+                    "details": None, "message": "uia_diff 返回空"}
+        summary = diff.get("summary", {})
+        changed = summary.get("changed", 0)
+        added = summary.get("added", 0)
+        removed = summary.get("removed", 0)
+        ff = summary.get("filtered_focus", 0)
+        fp = summary.get("filtered_position", 0)
+        fm = summary.get("filtered_meta", 0)
+        # 判定：有任意变化即视为操作生效
+        ok = (changed + added + removed) > 0
+        msg = (f"UIA diff: changed={changed}, added={added}, removed={removed}"
+               f" | filtered focus={ff}, pos={fp}, meta={fm}")
+        return {"ok": ok, "changed": changed, "added": added,
+                "removed": removed,
+                "filtered_focus": ff, "filtered_position": fp, "filtered_meta": fm,
+                "details": diff, "message": msg}
+    except Exception as e:
+        return {"ok": None, "changed": 0, "added": 0, "removed": 0,
+                "filtered_focus": 0, "filtered_position": 0, "filtered_meta": 0,
+                "details": None, "message": f"uia_diff 异常: {e}"}
+
+
 def verify(command: str, pre_snap: Dict[str, Any], file_path: Optional[str] = None,
            delay_ms: int = DEFAULT_DELAY_MS, app_name: str = "") -> Dict[str, Any]:
     """等待 `delay_ms` 后采集注入后快照并运行检查，返回结果字典。

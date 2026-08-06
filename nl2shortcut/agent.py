@@ -1,7 +1,9 @@
 """nl2shortcut main agent class."""
 
+import os
 import time
 import sys
+import logging
 from pathlib import Path
 from typing import Optional, List
 
@@ -17,6 +19,13 @@ from .llm import DeepSeekEngine, _load_api_key
 from .context import detect_context
 from .workflow import WorkflowEngine
 from .planner import GoalPlanner
+
+# 调试日志：设置环境变量 NL2SHORTCUT_DEBUG=1 启用
+_log = logging.getLogger(__name__)
+if os.environ.get("NL2SHORTCUT_DEBUG"):
+    _log.setLevel(logging.DEBUG)
+else:
+    _log.setLevel(logging.WARNING)  # 显式禁用 DEBUG，防止 root logger 配置泄漏
 
 
 class ShortcutAgent:
@@ -81,9 +90,10 @@ class ShortcutAgent:
     }
 
     # 验证等待时间（毫秒）：注入后等待系统响应
-    # 系统级操作（打开窗口/对话框）需要更长加载时间
-    _VERIFY_DELAY_MS = 300
-    _VERIFY_DELAY_SYSTEM_MS = 800  # Win+E/Win+R 等系统操作
+    # noop 命令（undo/redo/find/select_all 等 13 类）在 selfcheck 中直接跳过 sleep
+    # 这里仅控制 clipboard/window/mtime 类命令的等待
+    _VERIFY_DELAY_MS = 100
+    _VERIFY_DELAY_SYSTEM_MS = 400  # Win+E/Win+R 等系统操作
 
     # 需要更长验证延迟的命令
     _SYSTEM_COMMANDS = frozenset({
@@ -342,9 +352,12 @@ class ShortcutAgent:
 
         # Step 1: Recognize intent
         intent_result = self.recognize_intent(text)
+        _log.debug("[Agent] 识别结果 text=%r cmd=%s conf=%.3f kw=%s",
+                   text, intent_result.command, intent_result.confidence, intent_result.matched_keyword)
 
         # ── 复合操作通道（文件复制/移动等需视觉分步执行）──
         if intent_result.command == "__composite__" and intent_result.composite_plan:
+            _log.debug("[Agent] 进入复合操作通道 cmd=%s", intent_result.intent)
             elapsed = time.perf_counter() - start
             plan = intent_result.composite_plan
             if dry_run:
@@ -425,6 +438,8 @@ class ShortcutAgent:
         )
 
         if needs_decompose:
+            _log.debug("[Agent] 进入多步骤分解通道 needs_decompose=%s multi=%s file_dest=%s cmd=%s conf=%.3f",
+                       needs_decompose, is_multi, has_file_dest, intent_result.command, intent_result.confidence)
             # 确保 LLM 已初始化
             if not self._llm_enabled or not self._llm or not self._llm.available:
                 self._init_llm()
@@ -433,8 +448,10 @@ class ShortcutAgent:
                 plan = self.planner.plan(text)
                 if not plan or not plan.steps:
                     # 退化为单命令执行
+                    _log.debug("[Agent] planner 返回空计划，退化为单命令执行")
                     pass  # 继续走下面的普通流程
                 else:
+                    _log.debug("[Agent] planner 生效，steps=%d", len(plan.steps))
                     if dry_run:
                         step_summary = [
                             f"{s.action}({(s.description or s.key_combination or s.command or '')})"
@@ -480,6 +497,7 @@ class ShortcutAgent:
                     self._logger.log_execution(result)
                     return result
             except Exception as e:
+                _log.debug("[Agent] planner 异常: %s", e)
                 elapsed = time.perf_counter() - start
                 # GoalPlanner失败时尝试旧LLM fallback（兼容性）
                 if intent_result.command == "__plan__" and intent_result.alternatives:
@@ -534,6 +552,7 @@ class ShortcutAgent:
         # ── 鼠标左键点击（空格 / 点击）──
         # 映射到 adapter.click()，不经过数据库键位查找
         if intent_result.command == "left_click":
+            _log.debug("[Agent] 进入鼠标点击通道")
             elapsed = time.perf_counter() - start
             if dry_run:
                 result = ExecutionResult(
@@ -585,6 +604,8 @@ class ShortcutAgent:
                 if intent_result.command
                 else f"Could not understand: '{text}'"
             )
+            _log.debug("[Agent] 低置信度拒绝 conf=%.3f cmd=%s text=%r",
+                        intent_result.confidence, intent_result.command, text)
             result = ExecutionResult(
                 success=False,
                 intent=intent_result.intent,
@@ -601,6 +622,7 @@ class ShortcutAgent:
         shortcut = self._db.get_by_command(intent_result.command)
         if shortcut is None:
             elapsed = time.perf_counter() - start
+            _log.debug("[Agent] 快捷键查找失败（数据库无映射）cmd=%s", intent_result.command)
             result = ExecutionResult(
                 success=False,
                 intent=intent_result.intent,
@@ -617,6 +639,7 @@ class ShortcutAgent:
         key_combination = shortcut.get_key(platform)
         if not key_combination:
             elapsed = time.perf_counter() - start
+            _log.debug("[Agent] 键位查找失败 platform=%s cmd=%s", platform.value, intent_result.command)
             result = ExecutionResult(
                 success=False,
                 intent=intent_result.intent,
@@ -643,65 +666,134 @@ class ShortcutAgent:
             if alt not in candidates:
                 candidates.append(alt)
         candidates = candidates[:3]  # 最多 3 次尝试
+        _log.debug("[Agent] 候选键列表 cmd=%s candidates=%s needs_space=%s",
+                    intent_result.command, candidates, needs_space)
 
         error = None
         verified = False
         used_key = key_combination
         attempt = 0
+        # 标记是否由 C++ 执行内核完成（用于跳过 Python 验证循环）
+        executed_by_native = False
 
         if dry_run:
             # dry_run 模式：不执行，不验证
+            _log.debug("[Agent] dry_run 模式，跳过执行与验证")
             error = None
             verified = True
             used_key = candidates[0]
         else:
-            from .selfcheck import snapshot as _sc_snapshot, verify as _sc_verify
-
             # 系统级操作需要更长验证延迟
             verify_delay = (self._VERIFY_DELAY_SYSTEM_MS
                             if intent_result.command in self._SYSTEM_COMMANDS
                             else self._VERIFY_DELAY_MS)
+            _log.debug("[Agent] 验证延迟 delay_ms=%d is_system=%s",
+                        verify_delay, intent_result.command in self._SYSTEM_COMMANDS)
 
-            for attempt, try_key in enumerate(candidates):
-                error = None
+            # ── 优先尝试 C++ 执行内核 ──
+            # 把候选键构建 + 执行循环 + 验证 + 重试整体下沉到 C++，
+            # DLL 不可用或返回 None 时降级到 Python 实现。
+            # 注意：needs_space（鼠标选择）命令不路由到 C++ 执行器，因为 Space
+            # 注入属于鼠标点击通道的前置语义，C++ 执行器只处理纯热键。
+            if not needs_space:
                 try:
-                    # 注入前快照
-                    snap_before = _sc_snapshot(
-                        intent_result.command, app_name="")
-
-                    # 执行按键
-                    if needs_space and self.adapter:
-                        self.adapter.send_keys("Space")
-                    self.adapter.send_keys(try_key)
-                    self._db.increment_frequency(intent_result.command)
-
-                    # 注入后验证
-                    check_result = _sc_verify(
-                        intent_result.command, snap_before,
-                        delay_ms=verify_delay, app_name="")
-
-                    check_ok = check_result.get("ok")
-                    if check_ok is None:
-                        # noop（无可观察信号）→ 视为成功
-                        verified = True
-                        used_key = try_key
-                        break
-                    elif check_ok is True:
-                        # 验证通过
-                        verified = True
-                        used_key = try_key
-                        break
-                    else:
-                        # 验证失败 → 尝试下一个候选键
-                        error = (f"self-check failed (attempt {attempt+1}/{len(candidates)}): "
-                                 f"{check_result.get('message', 'unknown')}")
-                        continue
+                    from .native_loader import native as _native
+                    if _native.available:
+                        # 根据命令类型选择验证维度
+                        # clipboard 类（copy/cut/paste）→ 剪贴板验证
+                        # window 类（open_explorer/run_dialog/lock_screen 等）→ 窗口验证
+                        # noop 类（undo/redo/find 等）→ 不验证，首次注入即成功
+                        _CLIPBOARD_CMDS = frozenset({
+                            "copy", "cut", "paste", "select_all",
+                        })
+                        _WINDOW_CMDS = self._SYSTEM_COMMANDS
+                        use_clip = intent_result.command in _CLIPBOARD_CMDS
+                        use_win = intent_result.command in _WINDOW_CMDS
+                        _log.debug("[Agent] 尝试 C++ 执行内核 use_clip=%s use_win=%s",
+                                    use_clip, use_win)
+                        native_result = _native.execute_with_retry(
+                            candidates=candidates,
+                            verify_delay_ms=verify_delay,
+                            max_attempts=len(candidates),
+                            use_clipboard_check=use_clip,
+                            use_window_check=use_win,
+                        )
+                        if native_result is not None:
+                            _log.debug("[Agent] C++ 执行内核返回 success=%s used_key=%s attempts=%d",
+                                        native_result.get("success"),
+                                        native_result.get("used_key"),
+                                        native_result.get("attempts"))
+                            executed_by_native = True
+                            verified = bool(native_result.get("success"))
+                            used_key = native_result.get("used_key") or key_combination
+                            attempt = int(native_result.get("attempts", 0))
+                            if not verified:
+                                error = native_result.get("error") or "C++ executor failed"
+                            # native 执行器已注入按键，更新频率统计
+                            if verified:
+                                self._db.increment_frequency(intent_result.command)
+                        else:
+                            _log.debug("[Agent] C++ 执行内核返回 None，降级到 Python")
                 except Exception as e:
-                    error = f"execution error (attempt {attempt+1}): {e}"
-                    continue
+                    _log.debug("[Agent] C++ 执行内核异常，降级到 Python: %s", e)
 
-            if not verified and error is None:
-                error = "all key combinations exhausted without verification"
+            # ── Python 降级路径 ──
+            # 当 needs_space=True（鼠标选择）、native 不可用、或 native 返回 None 时
+            if not executed_by_native:
+                from .selfcheck import snapshot as _sc_snapshot, verify as _sc_verify
+
+                for attempt, try_key in enumerate(candidates):
+                    error = None
+                    try:
+                        # 注入前快照
+                        snap_before = _sc_snapshot(
+                            intent_result.command, app_name="")
+
+                        # 执行按键
+                        if needs_space and self.adapter:
+                            self.adapter.send_keys("Space")
+                        self.adapter.send_keys(try_key)
+                        self._db.increment_frequency(intent_result.command)
+
+                        # 注入后验证
+                        check_result = _sc_verify(
+                            intent_result.command, snap_before,
+                            delay_ms=verify_delay, app_name="")
+
+                        check_ok = check_result.get("ok")
+                        if check_ok is None:
+                            # noop（无可观察信号）→ 视为成功
+                            _log.debug("[Agent] 验证 noop（无观察信号）→ 视为成功 try=%s", try_key)
+                            verified = True
+                            used_key = try_key
+                            break
+                        elif check_ok is True:
+                            # 验证通过
+                            _log.debug("[Agent] 验证通过 attempt=%d/%d try=%s",
+                                        attempt + 1, len(candidates), try_key)
+                            verified = True
+                            used_key = try_key
+                            break
+                        else:
+                            # 验证失败 → 尝试下一个候选键
+                            error = (f"self-check failed (attempt {attempt+1}/{len(candidates)}): "
+                                     f"{check_result.get('message', 'unknown')}")
+                            _log.debug("[Agent] 验证失败 attempt=%d/%d try=%s msg=%s",
+                                        attempt + 1, len(candidates), try_key,
+                                        check_result.get('message', 'unknown'))
+                            continue
+                    except Exception as e:
+                        error = f"execution error (attempt {attempt+1}): {e}"
+                        _log.debug("[Agent] 执行异常 attempt=%d/%d try=%s err=%s",
+                                    attempt + 1, len(candidates), try_key, e)
+                        continue
+
+                if not verified and error is None:
+                    error = "all key combinations exhausted without verification"
+                    _log.debug("[Agent] 所有候选键耗尽未通过验证 cmd=%s", intent_result.command)
+                elif verified:
+                    _log.debug("[Agent] 最终成功 used_key=%s attempts=%d (Python降级)",
+                                used_key, attempt + 1)
 
         elapsed = time.perf_counter() - start
         # 展示用键位：复制/剪切时显式标出前置的 Space 勾选
@@ -802,23 +894,38 @@ class ShortcutAgent:
         is_multi_intent = any(m in text for m in _MULTI_INTENT_MARKERS)
 
         local_result = self._intent.recognize(text)
+        _log.debug("[Agent.recognize] 本地结果 text=%r cmd=%s conf=%.3f multi=%s",
+                   text, local_result.command, local_result.confidence, is_multi_intent)
 
         # 复合计划（__composite__）不需要 LLM 再分解，跳过打折
         if is_multi_intent and local_result.command != "__composite__":
             local_result.confidence *= 0.35  # 大幅打折，强制走 LLM
+            _log.debug("[Agent.recognize] 多意图打折 conf=%.3f→%.3f",
+                        local_result.confidence / 0.35, local_result.confidence)
 
         if local_result.confidence >= 0.75:
             # 高置信度：本地引擎直接搞定，零 API 调用
+            _log.debug("[Agent.recognize] 高置信直接返回（零API调用）")
             return local_result
 
         if self._llm_enabled and self._llm and self._llm.available:
             # 本地兜不住 → 投喂 DeepSeek
+            _log.debug("[Agent.recognize] 本地置信度不足，请求 LLM 兜底")
             llm_result = self._llm.recognize(text)
+            if llm_result is not None:
+                _log.debug("[Agent.recognize] LLM 返回 cmd=%s conf=%.3f",
+                            llm_result.command, llm_result.confidence)
+            else:
+                _log.debug("[Agent.recognize] LLM 返回 None")
             if llm_result and llm_result.confidence >= 0.4:
                 return llm_result
             # LLM 也低置信 → 尝试本地低置信结果（> 0.4 的仍可用）
             if local_result.confidence >= 0.4 and local_result.command:
+                _log.debug("[Agent.recognize] LLM 低置信，回退本地结果 conf=%.3f",
+                            local_result.confidence)
                 return local_result
+        else:
+            _log.debug("[Agent.recognize] LLM 未启用/不可用，使用本地结果")
 
         return local_result
 

@@ -7,12 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build as shared library (DLL)
 add_library(nl2shortcut_native SHARED
     src/uia.cpp
+    src/uia_diff.cpp
     src/inject.cpp
     src/window.cpp
     src/fuzzy_match.cpp
     src/scache.cpp
     src/context_proc.cpp
     src/pattern_cluster.cpp
+    src/executor.cpp
 )
 
 # Windows-specific settings

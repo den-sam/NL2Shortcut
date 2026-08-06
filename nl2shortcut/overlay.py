@@ -1,4 +1,4 @@
-﻿"""NL2Shortcut 的全局热键 + 浮动输入覆盖层。
+"""NL2Shortcut 的全局热键 + 浮动输入覆盖层。
 
 按下 Alt+Shift+S（可配置）即可从任意应用程序唤起一个浮动输入栏。
 输入你的意图，按 Enter，NL2Shortcut 便会把对应快捷键注入之前聚焦的窗口。
@@ -145,11 +145,13 @@ class HotkeyWorker(QObject):
     _WM_HOTKEY = 0x0312
     _HWND_MESSAGE = wintypes.HWND(-3)
 
-    def __init__(self, hotkey_combo: str = DEFAULT_HOTKEY, parent=None):
+    def __init__(self, hotkey_combo: str = DEFAULT_HOTKEY,
+                 hotkey_id: int = 1, parent=None):
         super().__init__(parent)
         self._hotkey_combo = hotkey_combo
         self._mods, self._vk = _parse_hotkey(hotkey_combo)
-        self._hotkey_id = 1
+        # 每个实例用独立 ID，避免多 worker 同时注册时冲突
+        self._hotkey_id = hotkey_id
         self._registered = False
         self._thread = None
         self._stop_event = threading.Event()
@@ -689,6 +691,12 @@ class FloatingInputBar(QWidget):
 # System Tray app
 # ═══════════════════════════════════════════════════════════════════════
 
+# 工作流热键绑定（Ctrl+Alt+1 ~ Ctrl+Alt+9）—— 一键触发前 9 个已保存的工作流
+WORKFLOW_HOTKEYS = [f"ctrl+alt+{i}" for i in range(1, 10)]
+# 录制器开关热键（Alt+Shift+R）
+RECORDER_HOTKEY = "alt+shift+r"
+
+
 class OverlayApp(QObject):
     """Main overlay: tray icon + global hotkey + floating bar."""
 
@@ -696,28 +704,140 @@ class OverlayApp(QObject):
         super().__init__()
         self._agent = ShortcutAgent()
         self._bar = FloatingInputBar(self._agent)
-        self._hotkey_worker = HotkeyWorker(hotkey)
+        self._hotkey_worker = HotkeyWorker(hotkey, hotkey_id=1)
         self._hotkey_worker.activated.connect(self._on_hotkey_activated)
         # Second hotkey for clipboard trigger mode
-        self._clip_hotkey_worker = HotkeyWorker(DEFAULT_CLIPBOARD_HOTKEY)
+        self._clip_hotkey_worker = HotkeyWorker(DEFAULT_CLIPBOARD_HOTKEY, hotkey_id=2)
         self._clip_hotkey_worker.activated.connect(self._on_clipboard_hotkey)
+
+        # ── 工作流热键绑定（Ctrl+Alt+1~9） ──
+        # 每个 worker 用独立 ID（3~11），触发时调对应工作流
+        self._workflow_workers: list[HotkeyWorker] = []
+        for idx, combo in enumerate(WORKFLOW_HOTKEYS):
+            worker = HotkeyWorker(combo, hotkey_id=3 + idx)
+            worker.activated.connect(lambda i=idx: self._run_workflow_by_index(i))
+            self._workflow_workers.append(worker)
+
+        # ── 录制器开关（Alt+Shift+R） ──
+        self._recorder = None
+        self._recorder_worker = HotkeyWorker(RECORDER_HOTKEY, hotkey_id=12)
+        self._recorder_worker.activated.connect(self._toggle_recorder)
+
         self._tray = None
         if show_tray:
             self._setup_tray()
+
+    # ── 工作流热键执行 ──────────────────────────────────────────────────
+
+    def _run_workflow_by_index(self, idx: int) -> None:
+        """Ctrl+Alt+1~9 触发已保存的第 idx 个工作流。"""
+        try:
+            wf_names = self._agent.workflow_engine.list_workflows()
+            if not wf_names:
+                self._show_tray_msg("暂无已保存的自动流程",
+                                     "请先录制或在工作流目录添加 YAML 文件")
+                return
+            sorted_names = sorted(wf_names)
+            if idx >= len(sorted_names):
+                self._show_tray_msg(
+                    f"没有第 {idx+1} 个工作流",
+                    f"目前只有 {len(sorted_names)} 个：{', '.join(sorted_names)}")
+                return
+            name = sorted_names[idx]
+            self._show_tray_msg(f"▶ 执行工作流: {name}", "正在执行…")
+            # 在独立线程跑，避免阻塞 Qt 主线程
+            threading.Thread(
+                target=self._exec_workflow_thread, args=(name,), daemon=True
+            ).start()
+        except Exception as e:
+            self._show_tray_msg("工作流执行失败", str(e))
+
+    def _exec_workflow_thread(self, name: str) -> None:
+        try:
+            result = self._agent.workflow_engine.run(name)
+            ok = result.success
+            msg = (f"{'✅ 成功' if ok else '❌ 失败'}：{name}\n"
+                   f"步骤: {len(result.steps)}  耗时: {result.elapsed_ms:.0f}ms")
+            if result.error:
+                msg += f"\n错误: {result.error}"
+            self._show_tray_msg("工作流执行完成", msg)
+        except Exception as e:
+            self._show_tray_msg("工作流执行异常", str(e))
+
+    # ── 录制器开关 ──────────────────────────────────────────────────────
+
+    def _toggle_recorder(self) -> None:
+        """Alt+Shift+R 切换录制状态。"""
+        try:
+            from .recorder import Recorder
+        except ImportError:
+            self._show_tray_msg("录制器不可用", "recorder.py 模块加载失败")
+            return
+
+        if self._recorder is None:
+            # 首次启动录制器（不注册自己的切换热键，由本 overlay 托管）
+            self._recorder = Recorder(memory=self._agent.operation_memory)
+            self._recorder.run(with_toggle_hotkey=False)
+            self._show_tray_msg("录制器已启动",
+                                 "按 Alt+Shift+R 开始录制\n再做一遍操作\n再按一次结束并保存")
+        else:
+            # 录制器已在跑，按一次切换录制状态
+            if self._recorder.is_recording:
+                path = self._recorder.stop_recording()
+                if path:
+                    self._show_tray_msg("💾 工作流已保存", path)
+                else:
+                    self._show_tray_msg("未保存", "没有录制到任何操作")
+            else:
+                self._recorder.start_recording()
+                self._show_tray_msg("▶ 开始录制", "按 Alt+Shift+R 结束并保存")
+
+    def _show_tray_msg(self, title: str, body: str) -> None:
+        """托盘气泡通知（如未启用托盘则降级为 print）。"""
+        if self._tray:
+            self._tray.showMessage(title, body,
+                                    QSystemTrayIcon.Information, 3000)
+        else:
+            print(f"[overlay] {title}: {body}")
 
     def _setup_tray(self):
         self._tray = QSystemTrayIcon(self)
         icon = self._make_tray_icon()
         self._tray.setIcon(icon)
         self._tray.setToolTip(
-            "NL2Shortcut — 自然语言快捷键 (Alt+Shift+S) | "
-            "剪贴板AI处理 (Ctrl+Alt+V)"
+            "NL2Shortcut — 输入栏(Alt+Shift+S) | "
+            "剪贴板AI(Ctrl+Alt+V) | "
+            "录制流程(Alt+Shift+R) | "
+            "工作流(Ctrl+Alt+1~9)"
         )
 
         menu = QMenu()
         show_action = QAction("唤出输入栏", menu)
         show_action.triggered.connect(self._bar.show_bar)
         menu.addAction(show_action)
+        menu.addSeparator()
+
+        # ── 录制器 ──
+        rec_action = QAction("录制新流程 (Alt+Shift+R)", menu)
+        rec_action.triggered.connect(self._toggle_recorder)
+        menu.addAction(rec_action)
+
+        # ── 工作流热键入口（Ctrl+Alt+1~9）──
+        wf_menu = menu.addMenu("已保存的流程 (Ctrl+Alt+1~9)")
+        try:
+            wf_names = sorted(self._agent.workflow_engine.list_workflows())
+        except Exception:
+            wf_names = []
+        if not wf_names:
+            none_act = QAction("（暂无 — 先录制一个）", wf_menu)
+            none_act.setEnabled(False)
+            wf_menu.addAction(none_act)
+        else:
+            for i, name in enumerate(wf_names[:9]):
+                act = QAction(f"{i+1}. {name}  (Ctrl+Alt+{i+1})", wf_menu)
+                act.triggered.connect(lambda n=name: self._run_workflow_by_name(n))
+                wf_menu.addAction(act)
+
         menu.addSeparator()
         gui_action = QAction("打开完整界面", menu)
         gui_action.triggered.connect(self._open_gui)
@@ -730,6 +850,13 @@ class OverlayApp(QObject):
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _run_workflow_by_name(self, name: str) -> None:
+        """从托盘菜单点击执行某个工作流。"""
+        self._show_tray_msg(f"▶ 执行工作流: {name}", "正在执行…")
+        threading.Thread(
+            target=self._exec_workflow_thread, args=(name,), daemon=True
+        ).start()
 
     def _make_tray_icon(self) -> QIcon:
         from PyQt5.QtGui import QPixmap
@@ -797,6 +924,17 @@ class OverlayApp(QObject):
     def _quit(self):
         self._hotkey_worker.stop()
         self._clip_hotkey_worker.stop()
+        # 停掉所有工作流热键
+        for w in self._workflow_workers:
+            w.stop()
+        self._recorder_worker.stop()
+        # 停掉录制器（如果在跑）
+        if self._recorder is not None:
+            try:
+                self._recorder.stop()
+            except Exception:
+                pass
+            self._recorder = None
         self._bar.hide_bar()
         if self._tray:
             self._tray.hide()
@@ -812,6 +950,17 @@ class OverlayApp(QObject):
         if not ok2:
             print("[nl2shortcut overlay] 剪贴板热键注册失败（Ctrl+Alt+V），"
                   "可通过托盘菜单唤出输入栏后手动粘贴内容",
+                  file=sys.stderr)
+        # 工作流热键（Ctrl+Alt+1~9）—— 失败不致命，只是少几个绑定
+        for i, w in enumerate(self._workflow_workers):
+            ok = w.start()
+            if not ok:
+                print(f"[nl2shortcut overlay] 工作流热键 Ctrl+Alt+{i+1} 注册失败",
+                      file=sys.stderr)
+        # 录制器开关（Alt+Shift+R）—— 失败不致命
+        ok = self._recorder_worker.start()
+        if not ok:
+            print("[nl2shortcut overlay] 录制器热键 Alt+Shift+R 注册失败",
                   file=sys.stderr)
         QApplication.instance().setQuitOnLastWindowClosed(False)
 

@@ -175,7 +175,14 @@ def _detect_linux() -> AppContext:
 
 
 def _get_process_name(pid: int) -> str:
-    """根据进程 ID 获取进程名称。"""
+    """根据进程 ID 获取进程名称。
+
+    优先级（由快到慢）：
+      1. psutil（~0.5ms）—— 已安装时
+      2. ctypes QueryFullProcessImageNameW（~0.1ms）—— Windows 内置，无需安装
+      3. tasklist subprocess（~170ms）—— 最后手段
+    """
+    # 1. psutil（最快）
     try:
         import psutil
         return psutil.Process(pid).name()
@@ -184,8 +191,29 @@ def _get_process_name(pid: int) -> str:
     except Exception:
         pass
 
-    # 回退方案：在 Windows 上使用 tasklist
+    # 2. ctypes QueryFullProcessImageNameW（无需 psutil，~0.1ms）
     if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                try:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(1024)
+                    # QueryFullProcessImageNameW(handle, flags=0, buf, &size)
+                    if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                        path = buf.value
+                        return path.rsplit("\\", 1)[-1]  # 只取文件名
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+        # 3. tasklist subprocess 回退（最慢，~170ms）
         try:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],

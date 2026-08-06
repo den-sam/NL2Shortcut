@@ -666,13 +666,14 @@ class GoalPlanner:
 
         prev_action = None
         for step in plan.steps:
-            # 输入文本后、回车前自动等待 1500ms：确保文件地址完整写入输入框，
-            # 避免输入竞态导致 Enter 提前触发（规避“没等到 1500ms 就回车”）。
+            # 输入文本后、回车前等待 300ms：确保文本已写入输入框，
+            # 避免输入竞态导致 Enter 提前触发。300ms 对多数应用足够
+            # （原 1.5s 过于保守，导致多步计划额外延迟）。
             if (step.action == "shortcut"
                     and (step.key_combination or "").strip().lower() == "enter"
                     and prev_action == "type"):
                 if not dry_run:
-                    time.sleep(1.5)
+                    time.sleep(0.3)
             result = self._map_to_keyboard_action(step, platform, dry_run)
             results.append(result)
             prev_action = step.action
@@ -1044,6 +1045,7 @@ def plan_to_workflow(
     """
     import re
     import yaml
+    from pathlib import Path
 
     _ROOT = Path.home()
     target_dir = dest_dir or (_ROOT / ".nl2shortcut" / "workflows")
@@ -1065,27 +1067,70 @@ def plan_to_workflow(
         return None
 
     # PlanStep → workflow step
+    # 关键：plan 的 action 集合（shortcut/type/tab/shell/wait/composite）
+    # 不等于 workflow 引擎支持的 action 集合（shortcut/type/click/scroll/shell/
+    # http/file/python/wait/condition）。这里必须做兼容映射，否则生成的 YAML
+    # 在回放时会被 workflow.py 的 _execute_step 当成 "Unknown action" 拒绝。
+    _DIRECTION_KEY = {
+        "tab": "Tab",
+        "shift_tab": "Shift+Tab",
+        "left": "Left", "right": "Right",
+        "up": "Up", "down": "Down",
+    }
+
     wf_steps = []
     for step in plan.steps:
-        wf_step = {
-            "name": step.description,
-            "action": step.action,
-        }
         if step.action == "shortcut":
-            wf_step["command"] = step.key_combination
+            wf_steps.append({
+                "name": step.description,
+                "action": "shortcut",
+                "command": step.key_combination,
+            })
         elif step.action == "type":
-            wf_step["command"] = step.text
+            wf_steps.append({
+                "name": step.description,
+                "action": "type",
+                "command": step.text,
+            })
         elif step.action == "shell":
-            wf_step["command"] = step.command
+            wf_steps.append({
+                "name": step.description,
+                "action": "shell",
+                "command": step.command,
+            })
+        elif step.action == "wait":
+            wf_steps.append({
+                "name": step.description,
+                "action": "wait",
+                "command": str(step.wait_ms / 1000.0) if step.wait_ms else "1",
+            })
         elif step.action == "tab":
-            wf_step["command"] = f"{step.direction} {step.n}" if step.n > 1 else step.direction
-        elif step.action in ("wait",):
-            wf_step["command"] = str(step.wait_ms / 1000.0) if step.wait_ms else "1"
+            # tab → 拆成 n 个 shortcut step（每个按一次方向键）
+            # 这样生成的 YAML 在回放时能与 LLM 规划时一致地按下方向键
+            key = _DIRECTION_KEY.get(step.direction, "Tab")
+            n = max(1, step.n)
+            for i in range(n):
+                wf_steps.append({
+                    "name": f"{step.description} ({i+1}/{n})" if n > 1 else step.description,
+                    "action": "shortcut",
+                    "command": key,
+                })
         elif step.action == "composite":
-            wf_step["command"] = f"[composite] {step.composite_hint[:60]}"
+            # composite 涉及视觉介入，无法在纯 YAML 中完整表达
+            # 暂存为 shell 占位，并在 name 中标注需人工/视觉介入
+            hint = step.composite_hint[:60] if step.composite_hint else ""
+            wf_steps.append({
+                "name": f"[需视觉介入] {step.description}",
+                "action": "shell",
+                "command": f"echo [composite placeholder] {hint}",
+            })
         else:
-            wf_step["command"] = step.key_combination or step.text or ""
-        wf_steps.append(wf_step)
+            # 未知 action：兜底为 shortcut，避免 _execute_step 报错
+            wf_steps.append({
+                "name": step.description,
+                "action": "shortcut",
+                "command": step.key_combination or step.text or "",
+            })
 
     doc = {
         "name": safe,

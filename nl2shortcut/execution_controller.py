@@ -213,7 +213,12 @@ class ExecutionController:
         # ═════════════════════════════════════════════════════════════
         # Step 3: 快速命中路径 —— 跳过 UIA 采集
         # ═════════════════════════════════════════════════════════════
-        if ctx.cache_hit:
+        # 多步意图强制跳过 cache_hit / single_shortcut 快速路径：
+        # 多步意图（如"保存后关闭"）即使 cache 里有单快捷键结果，
+        # 也不能直接用——必须走 workflow_match 或 LLM 拆解。
+        is_multi = self._has_multi_step_intent(intent)
+
+        if ctx.cache_hit and not is_multi:
             # 缓存命中 → 直接用缓存中的 key_combination 按键，跳过 agent.execute()
             result["pipeline"] = "cache_hit"
             result["avr_tier"] = "none"
@@ -251,15 +256,69 @@ class ExecutionController:
             # Step 3.5: Agent 直接映射（单快捷键，跳过 LLM + 路由）
             # "复制"/"粘贴"/"保存"/"撤销" 等简单操作在此命中。
             # 无需路由决策、无需 UIA 采集、无需 LLM。
+            # 多步意图跳过此路径，避免"保存后关闭"被误命中为"保存"→Ctrl+S。
             # ═════════════════════════════════════════════════════════
-            direct_result = self._try_shortcut_lookup(
-                intent, dry_run, timeout, app_name=ctx.app_name)
-            if direct_result is not None:
-                result["pipeline"] = "single_shortcut"
-                result["avr_tier"] = "none"
-                result["ok"] = direct_result.get("ok", False)
-                result["result"] = direct_result
-                result["tier_used"] = "keyboard"
+            direct_result = None
+            if not is_multi:
+                direct_result = self._try_shortcut_lookup(
+                    intent, dry_run, timeout, app_name=ctx.app_name)
+
+            # ── P0: 失败自动回退 ────────────────────────────────────────────
+            # 单快捷键"执行失败"或"低置信度+工作流匹配优先"时，
+            # 自动回退到工作流查找。让单快捷键失败时无缝衔接已保存工作流。
+            direct_shortcut_failed = (
+                direct_result is not None
+                and not direct_result.get("ok", False)
+            )
+            direct_shortcut_low_confidence = (
+                direct_result is not None
+                and direct_result.get("confidence", 1.0) < self.MIN_SHORTCUT_CONFIDENCE
+            )
+
+            if direct_result is not None and not direct_shortcut_failed:
+                # 单快捷键命中且执行成功，正常走 single_shortcut 路径
+                # （但若是低置信度，尝试工作流优先；命中工作流时覆盖结果）
+                if direct_shortcut_low_confidence:
+                    wf_result = self._try_workflow_match(intent, dry_run)
+                    if wf_result is not None and wf_result.get("ok"):
+                        # 工作流命中且执行成功 → 优先用工作流结果
+                        result["pipeline"] = "workflow_fallback"
+                        result["avr_tier"] = "none"
+                        result["workflow_hit"] = True
+                        result["ok"] = True
+                        result["result"] = wf_result
+                        result["tier_used"] = "keyboard"
+                    else:
+                        # 工作流未命中或失败 → 沿用原单快捷键结果
+                        result["pipeline"] = "single_shortcut"
+                        result["avr_tier"] = "none"
+                        result["ok"] = direct_result.get("ok", False)
+                        result["result"] = direct_result
+                        result["tier_used"] = "keyboard"
+                else:
+                    # 高置信度命中 → 直接用单快捷键结果
+                    result["pipeline"] = "single_shortcut"
+                    result["avr_tier"] = "none"
+                    result["ok"] = direct_result.get("ok", False)
+                    result["result"] = direct_result
+                    result["tier_used"] = "keyboard"
+            elif direct_shortcut_failed:
+                # ── P0 回退：单快捷键执行失败 → 自动尝试工作流 ──
+                wf_result = self._try_workflow_match(intent, dry_run)
+                if wf_result is not None:
+                    result["pipeline"] = "workflow_fallback"
+                    result["avr_tier"] = "none"
+                    result["workflow_hit"] = True
+                    result["ok"] = wf_result.get("ok", False)
+                    result["result"] = wf_result
+                    result["tier_used"] = "keyboard"
+                else:
+                    # 工作流也没命中 → 沿用单快捷键失败结果
+                    result["pipeline"] = "single_shortcut_failed"
+                    result["avr_tier"] = "none"
+                    result["ok"] = False
+                    result["result"] = direct_result
+                    result["tier_used"] = "keyboard"
             else:
                 # ═════════════════════════════════════════════════════
                 # Step 3.6: 工作流查找（多步意图优先匹配已有工作流）
@@ -314,8 +373,15 @@ class ExecutionController:
                         else:
                             # ═══════════════════════════════════════════
                             # Step 5: 需要 LLM → 延迟采集完整 UIA 快照（带缓存）
+                            # 复用 Step 1 的 light_state 剪贴板/选中文本，
+                            # 避免 UIA 采集路径中重复读取剪贴板（节省 ~1ms）
                             # ═══════════════════════════════════════════
                             ui_state = self.perception.snapshot(source="auto", use_cache=True)
+                            # 补充 light_state 已采集的字段（UIA 可能未覆盖）
+                            if not ui_state.clipboard_text and light_state.clipboard_text:
+                                ui_state.clipboard_text = light_state.clipboard_text
+                            if not ui_state.selected_text and light_state.selected_text:
+                                ui_state.selected_text = light_state.selected_text
 
                             # 用完整 UIA 数据重建上下文
                             full_ctx = self.context_store.build(
@@ -390,7 +456,10 @@ class ExecutionController:
         # "从X复制Y到Z"
         _re_ms.compile(r'(?:从|自)\s*.+\s*(?:复制|移动|剪切)\s*.+\s*(?:到|去)'),
         # 多步连接词：然后/接着/之后/再/同时
-        _re_ms.compile(r'(?:然后|接着|之后|再\s*|同时|随后)'),
+        _re_ms.compile(r'(?:然后|接着|之后|再\s*|同时|随后|最后)'),
+        # "X后Y" 模式：保存后关闭 / 复制后粘贴 / 打开后编辑
+        # "后"前后都需有内容，且后面跟常见动作词，避免"后退""后者"误判
+        _re_ms.compile(r'.+\s*后\s*(?:关闭|关掉|退出|保存|复制|粘贴|打开|编辑|发送|移动|删除|新建|创建|重命名|剪切|撤销|重做)'),
         # 英文多步: "find X and copy" / "search X and open"
         _re_ms.compile(r'(?:find|search|locate)\s+.+\s+and\s+(?:copy|open|paste|send|move)', _re_ms.IGNORECASE),
         # "打开X" — 泛化动词，不应走单快捷键（Ctrl+O 是打开文件对话框）
@@ -413,7 +482,9 @@ class ExecutionController:
             return False
 
         # 快速检测：是否包含多步连接词
-        multi_step_conjunctions = ['并', '然后', '接着', '之后', '同时', '随后']
+        # 注意：单字"后"不加入，因为"后退""后者"会误判；
+        # "X后Y" 模式由下面的正则 `_MULTI_STEP_PATTERNS` 精确匹配。
+        multi_step_conjunctions = ['并', '然后', '接着', '之后', '同时', '随后', '最后']
         for conj in multi_step_conjunctions:
             if conj in text:
                 return True
@@ -563,20 +634,29 @@ class ExecutionController:
                     return None
 
             # ── 执行按键（dry_run 跳过）───────────────
+            # P0 回退关键点：按键失败时返回 ok=False（而非抛异常返回 None），
+            # 让上层 ExecutionController.handle 有机会回退到 workflow_match。
+            exec_ok = True
+            exec_error = ""
             if not dry_run:
                 adapter = getattr(self._agent, 'adapter', None)
                 if adapter:
-                    adapter.send_keys(key_combo)
+                    try:
+                        adapter.send_keys(key_combo)
+                    except Exception as e:
+                        exec_ok = False
+                        exec_error = str(e)
 
             elapsed = (time.perf_counter() - t0) * 1000
 
             result = {
-                "ok": True,
+                "ok": exec_ok,
                 "command": command or "",
                 "key_combination": key_combo,
                 "confidence": confidence,
                 "intent": intent,
                 "elapsed_ms": elapsed,
+                "error": exec_error,
                 "source": "precache" if (self._precache and self._precache.is_built
                                           and self._precache.lookup_full(intent)) else "intent_engine",
             }
@@ -584,7 +664,8 @@ class ExecutionController:
             # ── 方向 A：写入语义缓存，让下次走 cache_hit 纯 send_keys ──
             # 只有当 intent 与键位确定绑定时才缓存（精确意图，避免模糊歧义污染）。
             # app_name 与 build() 时一致，确保第二次能命中 cache_hit 的 get(key, app_name)。
-            if intent and key_combo and command:
+            # P0：执行失败时不写缓存，避免下次又走失败路径。
+            if intent and key_combo and command and exec_ok:
                 try:
                     self.context_store.cache.set(
                         intent,

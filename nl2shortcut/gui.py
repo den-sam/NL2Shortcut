@@ -1,4 +1,4 @@
-"""nl2shortcut GUI - VS Code Light+ 风格界面
+﻿"""nl2shortcut GUI - VS Code Light+ 风格界面
 
 自然语言 → 快捷键 · 中英文双引擎 · 51 条内置快捷键
 左侧导航栏 (20%) + 右侧内容区 (80%)
@@ -14,10 +14,12 @@ CAT_EN_TO_CN = {
     'settings': '设置', 'dialog': '对话框'
 }
 
+import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 try:
     from PyQt5.QtWidgets import (
@@ -39,6 +41,59 @@ except ImportError:
 
 from nl2shortcut import ShortcutAgent
 from nl2shortcut.models import Platform, ExecutionResult
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 输入文字意图识别 —— "输入：XXX" / "输入『XXX』" 等
+# ═══════════════════════════════════════════════════════════════════════
+# 支持的包围符号对（开/闭）
+_TYPE_QUOTE_PAIRS = [
+    ('「', '」'), ('『', '』'), ('"', '"'), ("'", "'"),
+    ('（', '）'), ('(', ')'), ('【', '】'), ('[', ']'),
+    ('“', '”'), ('‘', '’'),
+]
+
+# "输入：XXX" / "输入:XXX" —— 冒号分隔，内容到行尾（支持多行）
+_TYPE_COLON_RE = re.compile(r'^输入\s*[:：]\s*(.+)$', re.DOTALL)
+
+
+def _parse_type_intent(text: str) -> Optional[str]:
+    """从用户输入中识别"输入：XXX" / "输入『XXX』"格式，返回要输入的文字。
+
+    支持的格式：
+        输入：你好          → 你好
+        输入:你好           → 你好
+        输入：你好世界      → 你好世界
+        输入『你好』        → 你好
+        输入「你好」        → 你好
+        输入"你好"          → 你好
+        输入【你好】        → 你好
+        输入（你好）        → 你好
+
+    不触发的例子（避免误识别）：
+        输入框 / 输入栏 / 输入法  —— 无冒号也无包围符号
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    # 模式1: 冒号分隔（支持多行内容）
+    m = _TYPE_COLON_RE.match(text)
+    if m:
+        content = m.group(1).strip()
+        if content:
+            return content
+
+    # 模式2: 包围符号（必须配对闭合）
+    for open_ch, close_ch in _TYPE_QUOTE_PAIRS:
+        prefix = f'输入{open_ch}'
+        if text.startswith(prefix) and text.endswith(close_ch) and len(text) > len(prefix):
+            content = text[len(prefix):-len(close_ch)].strip()
+            if content:
+                return content
+
+    return None
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # VS Code Light+ 主题色彩系统
@@ -87,32 +142,6 @@ QWidget {{
     color: {CL_TEXT};
     font-family: "微软雅黑", "Microsoft YaHei UI", "PingFang SC", sans-serif;
     font-size: 13px;
-}}
-
-/* ═════════ Activity Bar (最左侧图标栏) ═════════ */
-#activityBar {{
-    background-color: {CL_ACTIVITY};
-    min-width: 48px;
-    max-width: 48px;
-    border: none;
-}}
-#activityBtn {{
-    background: transparent;
-    color: #CCCCCC;
-    border: none;
-    border-left: 2px solid transparent;
-    padding: 12px 0px;
-    font-size: 18px;
-    text-align: center;
-    min-height: 44px;
-    max-height: 44px;
-}}
-#activityBtn:hover {{
-    color: #FFFFFF;
-}}
-#activityBtn#active {{
-    color: #FFFFFF;
-    border-left: 2px solid #FFFFFF;
 }}
 
 /* ═════════ 侧边栏导航 ═════════ */
@@ -527,29 +556,6 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Activity Bar 图标按钮
-# ═══════════════════════════════════════════════════════════════════════
-class ActivityButton(QPushButton):
-    """最左侧 Activity Bar 的图标按钮"""
-
-    def __init__(self, icon: str, tooltip: str, parent=None):
-        super().__init__(icon, parent)
-        self.setObjectName("activityBtn")
-        self.setToolTip(tooltip)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setCheckable(True)
-
-    def set_active(self, active: bool):
-        if active:
-            self.setProperty("active", True)
-        else:
-            self.setProperty("active", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # 侧边栏导航按钮
 # ═══════════════════════════════════════════════════════════════════════
 class SidebarButton(QPushButton):
@@ -592,11 +598,10 @@ class ExecutePanel(QWidget):
         layout.setSpacing(20)
 
         # 页头
-        page_title = QLabel("快捷执行")
+        page_title = QLabel("你想做什么？")
         page_title.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {CL_TEXT};")
         page_subtitle = QLabel(
-            f"当前平台:{Platform.detect().name}  ·  "
-            "输入你想做的事,自动匹配快捷键"
+            "输入你想做的事，程序自动帮你完成"
         )
         page_subtitle.setStyleSheet(f"font-size: 13px; color: {CL_TEXT_DIM};")
         layout.addWidget(page_title)
@@ -613,7 +618,8 @@ class ExecutePanel(QWidget):
         self._input = QTextEdit()
         self._input.setObjectName("mainInput")
         self._input.setPlaceholderText(
-            '输入指令，例如："复制这段文字" / "保存文件" / "format code" / "全选"…  (Ctrl+Enter 执行 · Ctrl+L 聚焦)'
+            '输入你想做的事，比如：复制、保存、打开浏览器…\n'
+            '要输入文字，用「输入：XXX」或「输入『XXX』」格式  (Ctrl+Enter 完成)'
         )
         self._input.setMinimumHeight(80)
         self._input.setMaximumHeight(120)
@@ -623,7 +629,7 @@ class ExecutePanel(QWidget):
         # 执行按钮（卡片底部）
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self._btn_exec = QPushButton("执行 (Ctrl+Enter)")
+        self._btn_exec = QPushButton("去做 (Ctrl+Enter)")
         self._btn_exec.setMinimumHeight(36)
         self._btn_exec.setMinimumWidth(130)
         self._btn_exec.setCursor(Qt.PointingHandCursor)
@@ -655,7 +661,7 @@ class ExecutePanel(QWidget):
 
         # 选项行
         opt_row = QHBoxLayout()
-        self._dry_run = QCheckBox("预览模式(仅显示按键,不实际执行)")
+        self._dry_run = QCheckBox("先看看，不实际操作")
         self._dry_run.setChecked(True)
         self._auto_clear = QCheckBox("执行后自动清空")
         opt_row.addWidget(self._dry_run)
@@ -741,7 +747,7 @@ class ExecutePanel(QWidget):
         tips_label = QLabel("试试:")
         tips_label.setStyleSheet(f"color: {CL_TEXT_MUTED}; font-size: 12px;")
         tips_row.addWidget(tips_label)
-        for example in ["复制", "保存", "全屏", "撤销", "截图", "终端", "搜索文件"]:
+        for example in ["复制", "保存", "全屏", "撤销", "截图", "输入：你好世界", "输入『张三』"]:
             tag = QLabel(example)
             tag.setObjectName("badge")
             tag.setCursor(Qt.PointingHandCursor)
@@ -789,6 +795,29 @@ class ExecutePanel(QWidget):
             return
 
         start = time.perf_counter()
+
+        # ── 输入文字快速通道：识别 "输入：XXX" / "输入『XXX』" 等格式 ──
+        # 命中后直接调用 agent.type_text()，绕过快捷键意图识别。
+        type_content = _parse_type_intent(text)
+        if type_content is not None:
+            # 预览要输入的内容（截断显示，避免过长撑爆界面）
+            preview_text = type_content if len(type_content) <= 40 else type_content[:37] + '…'
+            # 保存待执行动作
+            self._pending_action = ("type_text", type_content, text)
+            # 构造预览结果
+            platform = Platform.detect().value
+            self._show_result(ExecutionResult(
+                success=True,
+                intent=f"输入文字（{len(type_content)} 字）",
+                command="type",
+                key_combination=preview_text,
+                processing_time=time.perf_counter() - start,
+                platform=platform,
+                matched_keyword=text,
+                dry_run=self._dry_run.isChecked(),
+            ), text)
+            self._confirm_widget.setVisible(True)
+            return
 
         # ── 快速通道:精确匹配 ──
         shortcut = self._exact_map.get(text)
@@ -859,6 +888,22 @@ class ExecutePanel(QWidget):
                     self._result_detail.setText(f"执行失败: {e}")
             if self._auto_clear.isChecked():
                 self._input.clear()
+        elif kind == "type_text":
+            # 输入文字快速通道：直接调用 type_text，不经过快捷键意图识别
+            _, content, _ = action
+            if not self._dry_run.isChecked():
+                try:
+                    self._agent.type_text(content)
+                    # 更新结果展示为"已输入"
+                    self._result_key.setText(content if len(content) <= 40 else content[:37] + '…')
+                    self._result_key.setStyleSheet(
+                        f"font-size: 18px; font-weight: 600; color: {CL_SUCCESS}; padding: 4px 0;"
+                    )
+                    self._result_detail.setText(f"已输入 {len(content)} 个字符")
+                except Exception as e:
+                    self._result_detail.setText(f"输入失败: {e}")
+            if self._auto_clear.isChecked():
+                self._input.clear()
         elif kind == "full":
             _, result, text = action
             if not self._dry_run.isChecked():
@@ -892,26 +937,25 @@ class ExecutePanel(QWidget):
         self._result_widget.setVisible(True)
         if result.success:
             prefix = "预览 " if self._dry_run.isChecked() else ""
-            fast_tag = " ⚡精确匹配" if is_fast else ""
+            fast_tag = " ⚡" if is_fast else ""
             self._result_key.setText(f"{prefix}{result.key_combination}{fast_tag}")
             self._result_key.setStyleSheet(
                 f"font-size: 22px; font-weight: 600; color: {CL_TEXT}; padding: 4px 0;"
             )
             self._result_detail.setText(
-                f"意图:{result.intent}  ·  命令:{result.command}"
-                f"{'  ·  DeepSeek' if 'DeepSeek' in (result.matched_keyword or '') else ''}"
+                f"{result.intent or result.command}"
             )
         else:
-            self._result_key.setText(result.error or "未能识别")
+            self._result_key.setText(result.error or "没听懂，换个说法试试")
             self._result_key.setStyleSheet(
                 f"font-size: 16px; color: {CL_DANGER};"
             )
             self._result_detail.setText(
-                f"意图:{result.intent or '未知'}"
+                f"{result.intent or ''}"
             )
 
-        ms = f"{result.processing_time * 1000:.1f}ms"
-        self._result_time.setText(f"响应耗时 {ms}  ·  平台 {result.platform}")
+        ms = f"{result.processing_time * 1000:.0f}ms"
+        self._result_time.setText(f"用时 {ms}")
 
         status = "成功" if result.success else "失败"
         key = result.key_combination or result.error or ""
@@ -971,7 +1015,7 @@ class ShortcutsPanel(QWidget):
 
         page_title = QLabel("快捷键库")
         page_title.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {CL_TEXT};")
-        page_subtitle = QLabel("浏览全部快捷键映射")
+        page_subtitle = QLabel("程序能听懂的所有操作")
         page_subtitle.setStyleSheet(f"font-size: 13px; color: {CL_TEXT_DIM};")
         layout.addWidget(page_title)
         layout.addWidget(page_subtitle)
@@ -1465,17 +1509,17 @@ class WorkflowPanel(QWidget):
         layout.setSpacing(14)
 
         # ── 页头 ──
-        hdr = QLabel("工作流引擎")
+        hdr = QLabel("自动流程")
         hdr.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {CL_TEXT}; padding-bottom: 4px;")
         layout.addWidget(hdr)
 
         desc_row = QHBoxLayout()
-        desc = QLabel("YAML 定义多步自动化流程 - 快捷键 + Shell + HTTP + 文件 + Python")
+        desc = QLabel("把多个步骤串起来自动执行")
         desc.setStyleSheet(f"color: {CL_TEXT_DIM}; padding-bottom: 4px;")
         desc_row.addWidget(desc)
         desc_row.addStretch()
 
-        self._dry_check = QCheckBox("空跑模式")
+        self._dry_check = QCheckBox("先看看，不实际操作")
         self._dry_check.setChecked(True)
         self._dry_check.setToolTip("勾选 → 只预览不实际执行；取消 → 真正发送按键/运行命令")
         desc_row.addWidget(self._dry_check)
@@ -1488,7 +1532,7 @@ class WorkflowPanel(QWidget):
 
         # ── 工作流卡片列表 ──
         list_header_row = QHBoxLayout()
-        list_header = QLabel("📋 可用工作流")
+        list_header = QLabel("📋 已保存的自动流程")
         list_header.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {CL_TEXT}; padding-top: 4px;")
         list_header_row.addWidget(list_header)
         list_header_row.addStretch()
@@ -1559,13 +1603,13 @@ class WorkflowPanel(QWidget):
         left_layout.setContentsMargins(0, 0, 8, 0)
         left_layout.setSpacing(6)
 
-        yaml_header = QLabel("YAML 预览")
+        yaml_header = QLabel("流程内容预览")
         yaml_header.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {CL_TEXT}; padding-top: 4px;")
         left_layout.addWidget(yaml_header)
 
         self._yaml_preview = QTextEdit()
         self._yaml_preview.setReadOnly(True)
-        self._yaml_preview.setPlaceholderText("点击工作流卡片查看 YAML 定义...")
+        self._yaml_preview.setPlaceholderText("点击流程卡片查看具体步骤...")
         left_layout.addWidget(self._yaml_preview, 1)  # stretch = 1, fill available space
 
         splitter.addWidget(left_panel)
@@ -1626,7 +1670,7 @@ class WorkflowPanel(QWidget):
 
         names = self._agent.list_workflows()
         if not names:
-            empty = QLabel("暂无工作流。\n将 .yaml 文件放入 ~/.nl2shortcut/workflows/ 目录即可自动加载。")
+            empty = QLabel("还没有自动流程。\n在「做什么」里输入多步操作（如「保存后关闭」），\n程序会自动记下来变成可复用的流程。")
             empty.setStyleSheet(f"color: {CL_TEXT_MUTED}; font-size: 12px; padding: 16px;")
             empty.setAlignment(Qt.AlignCenter)
             self._wf_list_layout.insertWidget(0, empty)
@@ -1689,12 +1733,12 @@ class WorkflowPanel(QWidget):
             cr.addLayout(info_layout, 1)
             self._wf_cards[wf_name] = card
 
-            # ── 编辑按钮（打开 YAML 文件）──
+            # ── 编辑按钮（打开流程文件）──
             btn_edit = QPushButton("编辑")
             btn_edit.setFixedWidth(56)
             btn_edit.setFixedHeight(30)
             btn_edit.setCursor(Qt.PointingHandCursor)
-            btn_edit.setToolTip(f"在外部编辑器中打开 {wf_name}.yaml")
+            btn_edit.setToolTip(f"在外部编辑器中打开 {wf_name} 流程文件")
             btn_edit.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent;
@@ -1811,7 +1855,7 @@ class WorkflowPanel(QWidget):
         self._select_all_cb.blockSignals(False)
 
     def _edit_workflow(self, source_path: str):
-        """在外部编辑器中打开工作流 YAML 文件。"""
+        """在外部编辑器中打开流程文件。"""
         import os as _os
         import subprocess as _sp
         if not source_path or not _os.path.exists(source_path):
@@ -2217,33 +2261,23 @@ class AppContextPanel(QWidget):
 
 class MainWindow(QMainWindow):
     NAV_ITEMS = [
-        ("Agent",  0),
-        ("快捷键库", 1),
-        ("工作流", 2),
-        ("应用感知", 3),
-        ("执行历史", 4),
-        ("数据统计", 5),
-    ]
-
-    ACTIVITY_ICONS = [
-        ("🤖", "Agent 控制台"),
-        ("📋", "快捷键库"),
-        ("⚙",  "工作流"),
-        ("🔍", "应用感知"),
-        ("📜", "执行历史"),
-        ("📊", "数据统计"),
+        ("做什么", 0),
+        #("快捷键库", 5),  # 仅通过 帮助→快捷键参考(&K) 进入
+        ("自动流程", 1),
+        ("应用感知", 2),
+        ("执行历史", 3),
+        ("数据统计", 4),
     ]
 
     def __init__(self):
         super().__init__()
         self._agent = ShortcutAgent()
         self._nav_buttons: list[SidebarButton] = []
-        self._activity_buttons: list[ActivityButton] = []
         self._current_page = 0
         self._setup_ui()
         self._setup_menus()
         self._setup_shortcuts()
-        self.setWindowTitle("NL2Shortcut — Keyboard Master Agent")
+        self.setWindowTitle("NL2Shortcut — 用说话操作电脑")
         self.resize(1100, 720)
         self.setMinimumSize(900, 550)
 
@@ -2256,30 +2290,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ═══ Activity Bar (最左侧 48px) ═══
-        act_bar = QFrame()
-        act_bar.setObjectName("activityBar")
-        act_layout = QVBoxLayout(act_bar)
-        act_layout.setContentsMargins(0, 8, 0, 8)
-        act_layout.setSpacing(2)
-
-        for i, (icon, tooltip) in enumerate(self.ACTIVITY_ICONS):
-            btn = ActivityButton(icon, tooltip)
-            self._activity_buttons.append(btn)
-            act_layout.addWidget(btn)
-
-        act_layout.addStretch()
-
-        # 底部设置图标
-        settings_btn = ActivityButton("⚙", "设置")
-        settings_btn.setObjectName("activityBtn")
-        settings_btn.setCursor(Qt.PointingHandCursor)
-        settings_btn.clicked.connect(self._show_llm_settings)
-        act_layout.addWidget(settings_btn)
-
-        root.addWidget(act_bar)
-
-        # ═══ 侧边栏导航 (~20%) ═══
+        # ═══ 侧边栏导航 ═══
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar_layout = QVBoxLayout(sidebar)
@@ -2291,7 +2302,7 @@ class MainWindow(QMainWindow):
         section_label.setObjectName("sidebarTitle")
         sidebar_layout.addWidget(section_label)
 
-        app_title = QLabel("Keyboard Master")
+        app_title = QLabel("智能助手")
         app_title.setObjectName("sidebarSubtitle")
         sidebar_layout.addWidget(app_title)
 
@@ -2364,12 +2375,21 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(overlay_btn)
 
         # 底部状态
-        llm_status = "DeepSeek 在线" if self._agent.llm_available else "LLM 离线"
+        llm_status = "智能模式" if self._agent.llm_available else "基础模式"
         llm_color = CL_SUCCESS if self._agent.llm_available else CL_TEXT_MUTED
         self._llm_label = QLabel(llm_status)
         self._llm_label.setStyleSheet(
             f"font-size: 11px; font-weight: 600; color: {llm_color}; padding: 4px 20px;"
         )
+        # 设置按钮
+        settings_btn = QPushButton("⚙ 设置")
+        settings_btn.setObjectName("navButton")
+        settings_btn.setCursor(Qt.PointingHandCursor)
+        settings_btn.setToolTip("LLM 设置")
+        settings_btn.setMinimumHeight(32)
+        settings_btn.clicked.connect(self._show_llm_settings)
+        sidebar_layout.addWidget(settings_btn)
+
         sidebar_layout.addWidget(self._llm_label)
 
         ver_label = QLabel(f"v1.0.0  ·  {Platform.detect().name}")
@@ -2395,19 +2415,14 @@ class MainWindow(QMainWindow):
         self._agent_panel = AgentPanel(self._agent)
 
         self._stack.addWidget(self._agent_panel)        # 0 — Agent 首位
-        self._stack.addWidget(self._shortcuts_panel)    # 1
-        self._stack.addWidget(self._workflow_panel)     # 2
-        self._stack.addWidget(self._context_panel)      # 3
-        self._stack.addWidget(self._history)            # 4
-        self._stack.addWidget(self._stats_panel)       # 5
+        self._stack.addWidget(self._workflow_panel)     # 1
+        self._stack.addWidget(self._context_panel)      # 2
+        self._stack.addWidget(self._history)            # 3
+        self._stack.addWidget(self._stats_panel)        # 4
+        self._stack.addWidget(self._shortcuts_panel)    # 5 — 快捷键库（仅帮助→快捷键参考 进入）
 
         content_layout.addWidget(self._stack)
         root.addWidget(content)
-
-        # 导航切换 - Activity Bar
-        for i, btn in enumerate(self._activity_buttons):
-            idx = i  # capture
-            btn.clicked.connect(lambda checked, n=idx: self._switch_page(n))
 
         # 导航切换 - Sidebar
         for i, btn in enumerate(self._nav_buttons):
@@ -2434,12 +2449,12 @@ class MainWindow(QMainWindow):
         """)
         adapter_name = type(self._agent.adapter).__name__
         self._status_label = QLabel(
-            f"{Platform.detect().name}  ·  {adapter_name}  ·  51 快捷键  ·  中英文双引擎  ·  已就绪"
+            f"{Platform.detect().name}  ·  {adapter_name}  ·  已就绪"
         )
         self._status.addWidget(self._status_label)
         # Agent API status (right side of status bar)
         from PyQt5.QtWidgets import QLabel as _QL
-        self._agent_status_action = _QL("Agent API: starting...")
+        self._agent_status_action = _QL("服务启动中...")
         self._agent_status_action.setStyleSheet("color: #616161; padding: 0 12px;")
         self._status.addPermanentWidget(self._agent_status_action)
         self.setStatusBar(self._status)
@@ -2450,18 +2465,22 @@ class MainWindow(QMainWindow):
         self._set_active_all(index)
         self._stack.setCurrentIndex(index)
         self._current_page = index
-        if index == 1:
+        if index == 5:
             self._shortcuts_panel._load_all()
-        elif index == 3:
+        elif index == 2:
             self._context_panel._refresh_context()
-        elif index == 5:
+        elif index == 4:
             self._stats_panel.refresh()
 
-    def _set_active_all(self, index: int):
-        for i, btn in enumerate(self._activity_buttons):
-            btn.set_active(i == index)
+    def _set_active_all(self, stack_index: int):
+        """根据栈索引高亮侧边栏对应按钮；若不在 NAV_ITEMS 中则全部取消高亮"""
+        target = -1
+        for i, (_, si) in enumerate(self.NAV_ITEMS):
+            if si == stack_index:
+                target = i
+                break
         for i, btn in enumerate(self._nav_buttons):
-            btn.set_active(i == index)
+            btn.set_active(i == target)
 
     def _setup_menus(self):
         menubar = self.menuBar()
@@ -2478,10 +2497,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         view_menu = menubar.addMenu("视图(&V)")
-        for idx, (text, _) in enumerate(self.NAV_ITEMS):
+        for idx, (text, stack_idx) in enumerate(self.NAV_ITEMS):
             act = QAction(text, self)
             act.setShortcut(QKeySequence(f"Ctrl+{idx+1}"))
-            act.triggered.connect(lambda _, i=idx: self._switch_page(i))
+            act.triggered.connect(lambda _, si=stack_idx: self._switch_page(si))
             view_menu.addAction(act)
 
         tool_menu = menubar.addMenu("工具(&T)")
@@ -2495,7 +2514,7 @@ class MainWindow(QMainWindow):
         tool_menu.addAction(overlay_action)
 
         help_menu = menubar.addMenu("帮助(&H)")
-        llm_action = QAction("DeepSeek 设置(&D)", self)
+        llm_action = QAction("智能识别设置(&D)", self)
         llm_action.triggered.connect(self._show_llm_settings)
         help_menu.addAction(llm_action)
         help_menu.addSeparator()
@@ -2504,7 +2523,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about_action)
         shortcut_ref = QAction("快捷键参考(&K)", self)
         shortcut_ref.setShortcut(QKeySequence("Ctrl+K"))
-        shortcut_ref.triggered.connect(lambda: self._switch_page(1))
+        shortcut_ref.triggered.connect(lambda: self._switch_page(5))
         help_menu.addAction(shortcut_ref)
 
     def _setup_shortcuts(self):
@@ -2524,19 +2543,19 @@ class MainWindow(QMainWindow):
         Q = QtShortcut
         SEQ = QKeySequence
 
-        # ── Page switching (Ctrl+1..7) ──
-        for i in range(self._stack.count()):
+        # ── Page switching (Ctrl+1..N，对应侧边栏导航项) ──
+        for i, (_, stack_idx) in enumerate(self.NAV_ITEMS):
             sc = Q(SEQ(f"Ctrl+{i+1}"), self)
-            sc.activated.connect(lambda idx=i: self._switch_page(idx))
+            sc.activated.connect(lambda idx=stack_idx: self._switch_page(idx))
 
         # ── Cross-panel navigation ──
         Q(SEQ("Ctrl+L"), self).activated.connect(self._focus_command)
-        Q(SEQ("Ctrl+K"), self).activated.connect(lambda: self._switch_page(1))
-        Q(SEQ("Ctrl+H"), self).activated.connect(lambda: self._switch_page(4))
+        Q(SEQ("Ctrl+K"), self).activated.connect(lambda: self._switch_page(5))
+        Q(SEQ("Ctrl+H"), self).activated.connect(lambda: self._switch_page(3))
         Q(SEQ("Ctrl+Shift+A"), self).activated.connect(lambda: self._switch_page(6))
-        Q(SEQ("Ctrl+Shift+S"), self).activated.connect(lambda: self._switch_page(2))
-        Q(SEQ("Ctrl+Shift+D"), self).activated.connect(lambda: self._switch_page(5))
-        Q(SEQ("Ctrl+Shift+W"), self).activated.connect(lambda: self._switch_page(3))
+        Q(SEQ("Ctrl+Shift+S"), self).activated.connect(lambda: self._switch_page(1))
+        Q(SEQ("Ctrl+Shift+D"), self).activated.connect(lambda: self._switch_page(4))
+        Q(SEQ("Ctrl+Shift+W"), self).activated.connect(lambda: self._switch_page(2))
 
         # ── Common actions ──
         Q(SEQ("Ctrl+Enter"), self).activated.connect(self._trigger_execute)
@@ -2649,12 +2668,10 @@ class MainWindow(QMainWindow):
         rows = [
             ("导航", [
                 ("Ctrl+1",        "快捷执行"),
-                ("Ctrl+2",        "快捷键库"),
-                ("Ctrl+3",        "工作流"),
-                ("Ctrl+4",        "应用感知"),
-                ("Ctrl+5",        "执行历史"),
-                ("Ctrl+6",        "数据统计"),
-                ("Ctrl+7",        "Agent 控制台"),
+                ("Ctrl+2",        "工作流"),
+                ("Ctrl+3",        "应用感知"),
+                ("Ctrl+4",        "执行历史"),
+                ("Ctrl+5",        "数据统计"),
                 ("Ctrl+K",        "→ 快捷键库"),
                 ("Ctrl+H",        "→ 历史"),
                 ("Ctrl+Shift+A",  "→ Agent 控制台"),
@@ -2667,30 +2684,30 @@ class MainWindow(QMainWindow):
                 ("Ctrl+.",              "聚焦 dry-run 复选框"),
                 ("Ctrl+0 / Esc",        "清空输入"),
             ]),
-            ("快捷键库 (Ctrl+2)", [
+            ("快捷键库 (Ctrl+K · 帮助→快捷键参考)", [
                 ("Ctrl+F",              "聚焦搜索"),
                 ("Ctrl+Shift+L",        "切换中英文"),
                 ("↑ ↓",                 "上下移动选中行"),
             ]),
-            ("工作流 (Ctrl+3)", [
+            ("工作流 (Ctrl+2)", [
                 ("Ctrl+Enter",          "运行选中（预览）"),
                 ("Ctrl+Shift+Enter",    "运行选中（实际）"),
                 ("F5",                  "刷新列表"),
             ]),
-            ("应用感知 (Ctrl+4)", [
+            ("应用感知 (Ctrl+3)", [
                 ("F5 / Ctrl+R",         "重新检测"),
             ]),
-            ("执行历史 (Ctrl+5)", [
+            ("执行历史 (Ctrl+4)", [
                 ("Delete",              "删除选中行"),
                 ("Ctrl+Shift+Delete",   "清空全部"),
                 ("Ctrl+E",              "导出日志"),
                 ("Ctrl+C",              "复制选中行"),
             ]),
-            ("数据统计 (Ctrl+6)", [
+            ("数据统计 (Ctrl+5)", [
                 ("F5 / Ctrl+R",         "刷新"),
                 ("Ctrl+Shift+R",        "重置统计（确认）"),
             ]),
-            ("Agent 控制台 (Ctrl+7)", [
+            ("Agent 控制台 (Ctrl+Shift+A)", [
                 ("Ctrl+Enter",          "发送"),
                 ("Ctrl+B",              "启动/停止 API server"),
                 ("F5",                  "刷新能力清单"),
@@ -2722,9 +2739,9 @@ class MainWindow(QMainWindow):
         out.append(
             '<hr style="margin: 14px 0; border: none; border-top: 1px solid #E0E0E0;">'
             '<p style="color:#616161; font-size: 11px;">'
-            'NL2Shortcut 是"快捷键智能体"--本软件的主要操作都配了快捷键。'
-            '本软件也提供 <b>Agent API</b>(Ctrl+7 进入控制台启动),'
-            '供 OpenClaw / Claude 等 AI Agent 通过 HTTP 调 nl2shortcut 执行快捷键。</p>'
+            'NL2Shortcut 是"会听人话的快捷键助手"--本软件的主要操作都配了快捷键。'
+            '本软件也提供 <b>外部调用接口</b>(Ctrl+7 进入控制台启动),'
+            '可供其他 AI 助手通过 HTTP 调用本程序执行快捷键。</p>'
         )
         return ''.join(out)
 
@@ -2732,16 +2749,12 @@ class MainWindow(QMainWindow):
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.information(
             self, "设置",
-            "NL2Shortcut 设置:\n\n"
-            "• 编辑 ~/.nl2shortcut/config.json 修改 DeepSeek Key\n"
-            "• 编辑 ~/.nl2shortcut/shortcuts.db 自定义快捷键\n"
-            "• 编辑快捷键库(Ctrl+2)直接增删\n\n"
-            "更多设置即将到来。"
+            "设置说明：\n\n"
+            "• 在「帮助 → 智能识别设置」里开启智能识别\n"
+            "• 在「快捷键库」里查看程序能听懂的所有操作\n"
+            "• 在「自动流程」里查看和管理自动执行的多步操作\n\n"
+            "程序会自动记住你的使用习惯，越用越顺手。"
         )
-
-    def _show_llm_settings(self):
-        # ── 启动 Overlay (后台进程) ──
-        pass
 
     def _launch_mini_dialog(self):
         """Launch the mini floating dialog in background (tray + global hotkey)."""
@@ -2856,7 +2869,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_llm_status(self):
         llm_available = self._agent.llm_available
-        llm_status = "DeepSeek 在线" if llm_available else "LLM 离线"
+        llm_status = "智能模式" if llm_available else "基础模式"
         llm_color = CL_SUCCESS if llm_available else CL_TEXT_MUTED
         self._llm_label.setText(llm_status)
         self._llm_label.setStyleSheet(
@@ -2865,19 +2878,18 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(
-            self, "关于 nl2shortcut",
-            f"<h2>nl2shortcut v1.0.0 — Keyboard Master Agent</h2>"
-            "<p><b>自然语言 → 快捷键智能体</b></p>"
-            "<p>用说话的方式操作电脑 -- 输入你想做的事,自动匹配并执行对应快捷键。</p>"
+            self, "关于 NL2Shortcut",
+            f"<h2>NL2Shortcut v1.0.0</h2>"
+            "<p><b>用说话的方式操作电脑</b></p>"
+            "<p>输入你想做的事，程序自动帮你完成对应的操作。</p>"
             "<hr>"
-            "<p><b>核心特性</b></p>"
-            "<p>· 51 条内置快捷键  ·  86 条同义词映射<br>"
-            "· 中英文自然语言输入<br>"
-            "· 5 层意图识别引擎<br>"
-            "· Windows 原生按键模拟 (user32.dll)<br>"
-            "· 响应延迟 &lt; 3ms</p>"
+            "<p><b>能做什么</b></p>"
+            "<p>· 复制、粘贴、保存等常用操作<br>"
+            "· 打开软件、切换窗口<br>"
+            "· 把多步操作串起来自动执行<br>"
+            "· 记住你的习惯，越用越快</p>"
             "<hr>"
-            f"<p>Build with PyQt5 + SQLite  ·  Zero Ext Dependencies</p>",
+            f"<p>简单、快速、本地运行</p>",
         )
 
 
@@ -2950,7 +2962,7 @@ class LlmSettingsDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle("DeepSeek LLM 设置")
+        self.setWindowTitle("智能识别设置")
         self.setMinimumWidth(520)
         self.setModal(True)
         self.setStyleSheet(f"""
@@ -2979,14 +2991,14 @@ class LlmSettingsDialog(QDialog):
         layout.setSpacing(16)
         layout.setContentsMargins(24, 24, 24, 24)
 
-        title = QLabel("DeepSeek AI 语义识别引擎")
+        title = QLabel("智能识别")
         title.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {CL_TEXT};")
         layout.addWidget(title)
 
         desc = QLabel(
-            "接入 DeepSeek 后,智能体能真正理解你的自然语言意图。\n"
-            "例如输入「把这行复制一下」→ 自动匹配 Ctrl+C\n"
-            "离线引擎仍作为兜底,无网络也能正常工作。"
+            "开启后，程序能听懂更复杂的说法。\n"
+            "比如输入「把这行复制一下」→ 自动帮你按 Ctrl+C\n"
+            "不开启也能用，只是理解能力会弱一些。"
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color: {CL_TEXT_DIM}; font-size: 12px;")
@@ -2994,7 +3006,7 @@ class LlmSettingsDialog(QDialog):
 
         status_layout = QHBoxLayout()
         llm_available = self._agent.llm_available
-        status_text = "DeepSeek 已连接" if llm_available else "未配置 API Key"
+        status_text = "已开启" if llm_available else "未开启"
         status_label = QLabel(status_text)
         status_label.setStyleSheet(f"font-weight: 600; font-size: 14px;")
         status_layout.addWidget(status_label)
@@ -3008,7 +3020,7 @@ class LlmSettingsDialog(QDialog):
 
         layout.addLayout(status_layout)
 
-        key_label = QLabel("DeepSeek API Key:")
+        key_label = QLabel("识别密钥：")
         layout.addWidget(key_label)
 
         self._key_input = QLineEdit()
@@ -3068,7 +3080,7 @@ class LlmSettingsDialog(QDialog):
     def _test_connection(self):
         key = self._key_input.text().strip()
         if not key:
-            self._show_result(False, "请输入 API Key")
+            self._show_result(False, "请输入识别密钥")
             return
 
         self._show_result(False, "正在测试连接...")
@@ -3083,7 +3095,7 @@ class LlmSettingsDialog(QDialog):
     def _save_and_close(self):
         key = self._key_input.text().strip()
         if not key:
-            self._show_result(False, "请输入 API Key")
+            self._show_result(False, "请输入识别密钥")
             return
 
         ok = self._agent.configure_llm(key)

@@ -1,11 +1,21 @@
-﻿"""SQLite database manager for shortcut mappings."""
+"""SQLite database manager for shortcut mappings."""
 
+import os
 import sqlite3
+import threading
+import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .models import Shortcut, Platform
 from .windows10_shortcuts import MS_SHORTCUTS
+
+# 调试日志：设置环境变量 NL2SHORTCUT_DEBUG=1 启用
+_log = logging.getLogger(__name__)
+if os.environ.get("NL2SHORTCUT_DEBUG"):
+    _log.setLevel(logging.DEBUG)
+else:
+    _log.setLevel(logging.WARNING)  # 显式禁用 DEBUG，防止 root logger 配置泄漏
 
 SEED_SQL = r"""
 INSERT OR IGNORE INTO shortcuts (command, description, command_cn, description_cn, windows_key, mac_key, linux_key, category, application) VALUES
@@ -179,14 +189,36 @@ class DatabaseManager:
             config_dir.mkdir(parents=True, exist_ok=True)
             db_path = config_dir / "shortcuts.db"
         self.db_path = db_path
+        # 模块级单例连接 + Lock（遵循工程约束：避免每次操作新建连接）
+        self._conn_lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
+        # get_all 内存缓存 + 失效标志
+        self._all_cache: Optional[List[Shortcut]] = None
+        self._all_cache_category: Optional[str] = None
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        """返回单例 SQLite 连接（线程安全）。
+
+        首次调用时创建连接并设置 PRAGMA，后续复用同一连接。
+        写操作通过 _conn_lock 串行化，避免 WAL 模式下的写冲突。
+        """
+        if self._conn is None:
+            with self._conn_lock:
+                if self._conn is None:
+                    _log.debug("[DB] 首次创建连接 db=%s", self.db_path)
+                    conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    self._conn = conn
+        return self._conn
+
+    def _invalidate_cache(self) -> None:
+        """置脏 get_all 缓存（写操作后调用）。"""
+        _log.debug("[DB] 缓存失效（写操作触发）")
+        self._all_cache = None
+        self._all_cache_category = None
 
     def _init_db(self) -> None:
         conn = self._get_conn()
@@ -232,7 +264,7 @@ class DatabaseManager:
             self._seed_ms_shortcuts(conn)
             self._seed_ms_synonyms(conn)
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def reimport_ms_shortcuts(self) -> int:
         """一次性重导入：清理旧 ms_% 数据后重新接入（用于数据更新）。
@@ -252,7 +284,8 @@ class DatabaseManager:
             self._seed_ms_synonyms(conn)
             return n
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
+        self._invalidate_cache()
 
     def _seed_ms_shortcuts(self, conn) -> int:
         """将微软官方 Windows 10 键盘快捷方式接入库（幂等，可重复调用）。
@@ -386,16 +419,25 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as cnt FROM shortcuts")
-            if cursor.fetchone()["cnt"] > 0:
+            cnt = cursor.fetchone()["cnt"]
+            if cnt > 0:
+                _log.debug("[DB] seed_database 跳过（已有 %d 条）", cnt)
                 return 0
             conn.executescript(SEED_SQL)
             conn.commit()
             cursor.execute("SELECT COUNT(*) as cnt FROM shortcuts")
-            return cursor.fetchone()["cnt"]
+            total = cursor.fetchone()["cnt"]
+            _log.debug("[DB] seed_database 完成，共插入 %d 条", total)
+            return total
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def get_all(self, category: Optional[str] = None) -> List[Shortcut]:
+        # 内存缓存：首次查询后缓存结果，写操作时通过 _invalidate_cache() 置脏
+        if self._all_cache is not None and self._all_cache_category == category:
+            _log.debug("[DB] get_all 缓存命中 cat=%s rows=%d", category, len(self._all_cache))
+            return self._all_cache
+
         conn = self._get_conn()
         try:
             if category:
@@ -407,9 +449,13 @@ class DatabaseManager:
                 rows = conn.execute(
                     "SELECT * FROM shortcuts ORDER BY category, command"
                 ).fetchall()
-            return [self._row_to_shortcut(r) for r in rows]
+            result = [self._row_to_shortcut(r) for r in rows]
+            self._all_cache = result
+            self._all_cache_category = category
+            _log.debug("[DB] get_all 缓存未命中，重新查询 cat=%s rows=%d", category, len(result))
+            return result
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def get_by_command(self, command: str) -> Optional[Shortcut]:
         conn = self._get_conn()
@@ -418,9 +464,11 @@ class DatabaseManager:
                 "SELECT * FROM shortcuts WHERE command=?",
                 (command,)
             ).fetchone()
-            return self._row_to_shortcut(row) if row else None
+            found = self._row_to_shortcut(row) if row else None
+            _log.debug("[DB] get_by_command cmd=%s hit=%s", command, bool(found))
+            return found
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def search(self, keyword: str) -> List[Shortcut]:
         conn = self._get_conn()
@@ -434,9 +482,11 @@ class DatabaseManager:
                    OR sy.synonym LIKE ?
                 ORDER BY s.frequency DESC, s.command
             """, (pattern, pattern, pattern)).fetchall()
-            return [self._row_to_shortcut(r) for r in rows]
+            result = [self._row_to_shortcut(r) for r in rows]
+            _log.debug("[DB] search kw=%r rows=%d", keyword, len(result))
+            return result
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def find_by_synonym(self, text: str) -> Optional[Shortcut]:
         conn = self._get_conn()
@@ -447,9 +497,11 @@ class DatabaseManager:
                 WHERE sy.synonym = ?
                 LIMIT 1
             """, (text,)).fetchone()
-            return self._row_to_shortcut(row) if row else None
+            found = self._row_to_shortcut(row) if row else None
+            _log.debug("[DB] find_by_synonym text=%r hit=%s", text, bool(found))
+            return found
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def increment_frequency(self, command: str) -> None:
         conn = self._get_conn()
@@ -460,7 +512,9 @@ class DatabaseManager:
             )
             conn.commit()
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
+        _log.debug("[DB] increment_frequency cmd=%s", command)
+        # frequency 变化不影响 get_all 结果（频率在结果排序中非关键字段），不置脏
 
     def add_shortcut(self, shortcut: Shortcut) -> bool:
         conn = self._get_conn()
@@ -483,14 +537,18 @@ class DatabaseManager:
                 shortcut.application,
             ))
             conn.commit()
+            _log.debug("[DB] add_shortcut 成功 cmd=%s win=%s", shortcut.command, shortcut.windows_key)
             return True
         except sqlite3.IntegrityError:
+            _log.debug("[DB] add_shortcut 冲突（命令已存在）cmd=%s", shortcut.command)
             return False
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
+        self._invalidate_cache()
 
     def update_shortcut(self, shortcut: Shortcut) -> bool:
         if shortcut.id is None:
+            _log.debug("[DB] update_shortcut 拒绝（id=None）cmd=%s", shortcut.command)
             return False
         conn = self._get_conn()
         try:
@@ -506,9 +564,12 @@ class DatabaseManager:
                 shortcut.application, shortcut.id,
             ))
             conn.commit()
-            return conn.total_changes > 0
+            changed = conn.total_changes > 0
+            _log.debug("[DB] update_shortcut id=%s cmd=%s changed=%s", shortcut.id, shortcut.command, changed)
+            return changed
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
+        self._invalidate_cache()
 
     def get_stats(self) -> Tuple[int, List[Tuple[str, str, int]]]:
         conn = self._get_conn()
@@ -525,7 +586,7 @@ class DatabaseManager:
                 (r["command"], r["description"], r["frequency"]) for r in top
             ]
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     def reset_frequency(self) -> None:
         conn = self._get_conn()
@@ -533,7 +594,7 @@ class DatabaseManager:
             conn.execute("UPDATE shortcuts SET frequency = 0")
             conn.commit()
         finally:
-            conn.close()
+            pass  # 单例连接不关闭
 
     @staticmethod
     def _row_to_shortcut(row: sqlite3.Row) -> Shortcut:

@@ -1,4 +1,4 @@
-﻿"""工作流引擎 —— 由 YAML 定义的多步骤自动化。
+"""工作流引擎 —— 由 YAML 定义的多步骤自动化。
 
 工作流 DSL：
   name: "Deploy"
@@ -141,6 +141,8 @@ class WorkflowEngine:
                 condition=s.get("condition", ""),
                 retry=s.get("retry", 0),
                 timeout=s.get("timeout", 10.0),
+                loop=s.get("loop", ""),
+                loop_var=s.get("loop_var", "item"),
             ))
 
         return WorkflowDefinition(
@@ -169,6 +171,9 @@ class WorkflowEngine:
 
         return self.execute(wf, variables=variables, dry_run=dry_run)
 
+    # while 循环最大迭代数（防止死循环）
+    _MAX_LOOP_ITER = 1000
+
     def execute(
         self,
         wf: WorkflowDefinition,
@@ -185,10 +190,20 @@ class WorkflowEngine:
         overall_success = True
 
         for step in wf.steps:
-            # 检查条件
+            # ── 第2步：循环结构 ──────────────────────────────────────
+            # step.loop 为空 → 单次执行（含 condition 检查）
+            # step.loop 非空 → 按 iterable 迭代，condition 在每次迭代内部求值
+            #   （此时 $item 已注入 ctx，可基于循环变量做条件跳过）
+            if step.loop:
+                results = self._execute_loop_step(step, ctx, dry_run)
+                step_results.extend(results)
+                if any(not r.success for r in results):
+                    overall_success = False
+                continue
+
+            # 单次执行路径：先检查 condition（无循环变量可用）
             if step.condition:
                 try:
-                    # 条件求值：暴露 ctx 字典 + 安全内置函数
                     _safe_builtins = {"int": int, "str": str, "bool": bool, "float": float, "len": len, "ctx": ctx}
                     if not eval(step.condition, {"__builtins__": _safe_builtins}, ctx):
                         step_results.append(StepResult(
@@ -206,27 +221,10 @@ class WorkflowEngine:
                     overall_success = False
                     break
 
-            # 在 command 与 args.content 中做变量插值
-            cmd = self._interpolate(step.command, ctx)
-            args = {k: self._interpolate(v, ctx) if isinstance(v, str) else v
-                    for k, v in step.args.items()}
-
-            # 带重试地执行
-            result = None
-            for attempt in range(step.retry + 1):
-                result = self._execute_step(step, cmd, dry_run, args)
-                if result.success:
-                    break
-                if attempt < step.retry:
-                    time.sleep(0.5)
-
-            if result:
-                if result.output and step.capture and not dry_run:
-                    ctx[step.capture] = result.output.strip()
-                step_results.append(result)
-                if not result.success:
-                    overall_success = False
-                    # 继续下一步（尽力而为），不要中断
+            result = self._run_step_once(step, ctx, dry_run)
+            step_results.append(result)
+            if not result.success:
+                overall_success = False
 
         elapsed = (time.perf_counter() - start) * 1000
         return WorkflowResult(
@@ -237,9 +235,131 @@ class WorkflowEngine:
             total_duration_ms=elapsed,
         )
 
+    def _run_step_once(
+        self, step: WorkflowStep, ctx: Dict[str, Any], dry_run: bool,
+    ) -> StepResult:
+        """单次执行一个步骤（无循环）：变量插值 + 重试。"""
+        cmd = self._interpolate(step.command, ctx)
+        args = {k: self._interpolate(v, ctx) if isinstance(v, str) else v
+                for k, v in step.args.items()}
+
+        result = None
+        for attempt in range(step.retry + 1):
+            result = self._execute_step(step, cmd, dry_run, args, ctx=ctx)
+            if result.success:
+                break
+            if attempt < step.retry:
+                time.sleep(0.5)
+
+        if result and result.output and step.capture and not dry_run:
+            ctx[step.capture] = result.output.strip()
+        return result
+
+    def _execute_loop_step(
+        self, step: WorkflowStep, ctx: Dict[str, Any], dry_run: bool,
+    ) -> list:
+        """循环执行一个步骤。
+
+        支持：
+          - "range(5)"     → for i in range(5)
+          - "range(1,10)"  → for i in range(1, 10)
+          - "ctx['rows']"  → for item in ctx['rows']
+          - "while expr"   → while eval(expr): run step
+
+        while 循环有 _MAX_LOOP_ITER 保护。
+        每次迭代把当前循环变量写入 ctx[step.loop_var]。
+        每次迭代的执行结果单独作为一个 StepResult 返回（带 [i/N] 后缀）。
+        """
+        loop_expr = (step.loop or "").strip()
+        results: list = []
+
+        # 解析 loop 表达式得到 iterable
+        _safe_builtins = {
+            "range": range, "len": len, "ctx": ctx,
+            "int": int, "str": str, "list": list,
+        }
+
+        if loop_expr.startswith("while "):
+            # while 循环
+            cond_expr = loop_expr[len("while "):].strip()
+            iter_count = 0
+            while iter_count < self._MAX_LOOP_ITER:
+                try:
+                    keep = bool(eval(cond_expr, {"__builtins__": _safe_builtins}, ctx))
+                except Exception as e:
+                    results.append(StepResult(
+                        step_name=step.name,
+                        success=False,
+                        error=f"while condition eval failed: {e}",
+                    ))
+                    return results
+                if not keep:
+                    break
+                ctx[step.loop_var] = iter_count
+                r = self._run_step_once(step, ctx, dry_run)
+                r.step_name = f"{step.name} [{iter_count}]"
+                results.append(r)
+                if not r.success:
+                    return results
+                iter_count += 1
+            if iter_count >= self._MAX_LOOP_ITER:
+                results.append(StepResult(
+                    step_name=step.name,
+                    success=False,
+                    error=f"loop exceeded _MAX_LOOP_ITER ({self._MAX_LOOP_ITER})",
+                ))
+            return results
+
+        # 普通 for 循环：求值得到 iterable
+        try:
+            iterable = eval(loop_expr, {"__builtins__": _safe_builtins}, ctx)
+        except Exception as e:
+            results.append(StepResult(
+                step_name=step.name,
+                success=False,
+                error=f"loop expression eval failed: {e}",
+            ))
+            return results
+
+        try:
+            n = len(iterable)
+        except TypeError:
+            n = None  # 生成器/迭代器，无法预知长度
+
+        for i, item in enumerate(iterable):
+            ctx[step.loop_var] = item
+            # 循环内部检查 condition（此时 $item 已注入 ctx）
+            if step.condition:
+                try:
+                    _safe_builtins = {"int": int, "str": str, "bool": bool, "float": float,
+                                      "len": len, "ctx": ctx}
+                    if not eval(step.condition, {"__builtins__": _safe_builtins}, ctx):
+                        suffix = f" [{i+1}/{n}]" if n is not None else f" [{i+1}]"
+                        results.append(StepResult(
+                            step_name=f"{step.name}{suffix}",
+                            success=True,
+                            output="skipped (condition false)",
+                        ))
+                        continue
+                except Exception as e:
+                    results.append(StepResult(
+                        step_name=step.name,
+                        success=False,
+                        error=f"Condition eval failed in loop: {e}",
+                    ))
+                    return results
+            r = self._run_step_once(step, ctx, dry_run)
+            suffix = f" [{i+1}/{n}]" if n is not None else f" [{i+1}]"
+            r.step_name = f"{step.name}{suffix}"
+            results.append(r)
+            if not r.success:
+                break
+        return results
+
     def _execute_step(
         self, step: WorkflowStep, cmd: str, dry_run: bool,
         args: Optional[Dict[str, Any]] = None,
+        ctx: Optional[Dict[str, Any]] = None,
     ) -> StepResult:
         """执行单个工作流步骤。"""
         start = time.perf_counter()
@@ -262,11 +382,16 @@ class WorkflowEngine:
             elif step.action == "file":
                 output = self._tools.file_io(cmd, args or step.args, dry_run)
             elif step.action == "python":
-                output = self._tools.python_eval(cmd, dry_run)
+                # 传入 ctx，让 python step 能访问工作流变量（循环计数器等）
+                output = self._tools.python_eval(cmd, dry_run, ctx=ctx)
             elif step.action == "wait":
                 output = self._tools.wait(cmd, dry_run)
             elif step.action == "condition":
                 output = self._tools.condition(cmd, dry_run)
+            elif step.action == "click_element":
+                # 第3步：UI 元素定位 → 取 BoundingRectangle 中心点 → 调用现有 click
+                # args 里支持 name / control_type / role / index 等选择器
+                output = self._tools.click_element(args or {}, dry_run)
             else:
                 return StepResult(
                     step_name=step.name,
@@ -420,8 +545,12 @@ class _ToolRegistry:
             return f"wrote {len(content)} bytes to {path}"
         return "unknown file mode"
 
-    def python_eval(self, expr: str, dry_run: bool) -> str:
-        """执行一个 Python 表达式。"""
+    def python_eval(self, expr: str, dry_run: bool, ctx: Optional[Dict[str, Any]] = None) -> str:
+        """执行一个 Python 表达式。
+
+        ctx 非空时，工作流变量作为 locals 注入，可在表达式里直接访问
+        （如 `ctx['counter']` 或捕获到 locals 后直接 `counter`）。
+        """
         if dry_run:
             return f"[dry-run] python: {expr}"
         try:
@@ -434,7 +563,9 @@ class _ToolRegistry:
                 "min": min, "max": max, "abs": abs, "round": round,
                 "bool": bool, "True": True, "False": False, "None": None,
             }
-            result = eval(expr, {"__builtins__": safe}, {})
+            # ctx 作为 locals，safe 作为 globals 的 __builtins__
+            locals_dict = dict(ctx) if ctx else {}
+            result = eval(expr, {"__builtins__": safe, "ctx": ctx or {}}, locals_dict)
             return str(result)
         except Exception as e:
             return f"python eval error: {e}"
@@ -463,3 +594,137 @@ class _ToolRegistry:
     def condition(self, expr: str, dry_run: bool) -> str:
         """求值一个条件（返回 'true' 或 'false'）。"""
         return str(bool(eval(expr, {"__builtins__": {}}, {})))
+
+    # ── 第3步：UI 元素定位 ──────────────────────────────────────────
+
+    # 控件类型短名 → UIA ControlTypeName 映射（YAML 里可写短名也可写全名）
+    _CT_ALIASES = {
+        "button": "ButtonControl",
+        "btn": "ButtonControl",
+        "edit": "EditControl",
+        "textbox": "EditControl",
+        "input": "EditControl",
+        "link": "HyperlinkControl",
+        "combobox": "ComboBoxControl",
+        "list": "ListControl",
+        "listitem": "ListItemControl",
+        "menu": "MenuControl",
+        "menuitem": "MenuItemControl",
+        "tab": "TabControl",
+        "tabitem": "TabItemControl",
+        "checkbox": "CheckBoxControl",
+        "radio": "RadioButtonControl",
+        "tree": "TreeControl",
+        "treeitem": "TreeItemControl",
+    }
+
+    def click_element(self, selector: dict, dry_run: bool) -> str:
+        """按 UI 选择器点击 UI 元素（无需知道坐标）。
+
+        selector:
+            name: 控件名称（子串匹配，大小写不敏感；空则不限）
+            control_type: 控件类型（短名或全名，如 "button" 或 "ButtonControl"）
+            role: 角色名（可选，进一步过滤）
+            index: 第 N 个匹配（0-based，默认 0）
+            button: 鼠标按钮 'left'/'right'/'middle'（默认 left）
+            clicks: 点击次数（默认 1）
+            double: True 时等于 clicks=2
+
+        流程：
+          1. 通过 UiaProvider.snapshot() 采集 UI 树（失败则降级到 LightProvider
+             单节点窗口，此时按 name 匹配窗口后点击窗口中心）
+          2. 在树中按 selector 查找匹配节点
+          3. 取节点 BoundingRectangle 中心 (cx, cy)
+          4. 调用现有 self._agent.click(x=cx, y=cy, ...)
+        """
+        name = (selector.get("name") or "").strip()
+        ct_raw = (selector.get("control_type") or "").strip()
+        role = (selector.get("role") or "").strip()
+        index = int(selector.get("index", 0))
+        button = (selector.get("button") or "left").strip()
+        clicks = int(selector.get("clicks", 1))
+        if selector.get("double"):
+            clicks = 2
+
+        # 控件类型标准化为 UIA ControlTypeName
+        ct_filter = ""
+        if ct_raw:
+            ct_filter = self._CT_ALIASES.get(ct_raw.lower(), ct_raw)
+
+        # 构造 dry-run 预览描述
+        desc_parts = []
+        if name: desc_parts.append(f'name~"{name}"')
+        if ct_filter: desc_parts.append(f'type={ct_filter}')
+        if role: desc_parts.append(f'role={role}')
+        if index: desc_parts.append(f'index={index}')
+        desc = " ".join(desc_parts) or "(any)"
+
+        # 1. 采集 UI 快照（复用 PerceptionStack 的 UiaProvider）
+        uistate = self._capture_uia_snapshot()
+        if uistate is None or uistate.root is None:
+            if dry_run:
+                return f"[dry-run] click_element {desc} [UIA 不可用，将回退到坐标点击]"
+            return f"click_element failed: UIA snapshot unavailable"
+
+        # 2. 在 UI 树中查找匹配节点
+        matches = []
+        self._collect_matches(uistate.root, name, ct_filter, role, matches)
+
+        if not matches:
+            if dry_run:
+                return f"[dry-run] click_element {desc} [未找到匹配节点，树中共 {uistate.node_count} 节点]"
+            return f"click_element failed: no matching node ({desc})"
+
+        if index >= len(matches):
+            if dry_run:
+                return f"[dry-run] click_element {desc} [index 超出范围，匹配到 {len(matches)} 个]"
+            return f"click_element failed: index {index} out of {len(matches)} matches"
+
+        node = matches[index]
+        # 3. 取 BoundingRectangle 中心点
+        if node.width <= 0 or node.height <= 0:
+            if dry_run:
+                return f"[dry-run] click_element {desc} [节点无 BoundingRectangle]"
+            return f"click_element failed: node has no bounding rect"
+
+        cx = node.x + node.width // 2
+        cy = node.y + node.height // 2
+
+        if dry_run:
+            return (f"[dry-run] click_element {desc} "
+                    f"-> ({cx},{cy}) name={node.name!r} type={node.control_type}")
+
+        # 4. 调用现有 agent.click
+        self._agent.click(x=cx, y=cy, button=button, clicks=clicks)
+        return f"clicked '{node.name}' at ({cx},{cy})"
+
+    def _capture_uia_snapshot(self):
+        """采集 UIA 快照；UIA 不可用时返回 None（由调用方决定降级）。"""
+        try:
+            from .perception import UiaProvider
+            provider = UiaProvider()
+            if not provider.available():
+                return None
+            return provider.snapshot()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _collect_matches(root, name: str, ct_filter: str, role: str, out: list):
+        """递归收集所有匹配的节点到 out 列表。"""
+        # name 子串匹配（大小写不敏感）
+        if name:
+            if name.lower() not in (root.name or "").lower():
+                pass  # name 不匹配，但仍要遍历子节点
+            else:
+                if (not ct_filter or root.control_type == ct_filter) and \
+                   (not role or root.role == role):
+                    out.append(root)
+        else:
+            # 无 name 过滤，仅按类型/角色
+            if (not ct_filter or root.control_type == ct_filter) and \
+               (not role or root.role == role):
+                out.append(root)
+
+        for child in root.children:
+            _ToolRegistry._collect_matches(child, name, ct_filter, role, out)

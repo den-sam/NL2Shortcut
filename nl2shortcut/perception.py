@@ -937,8 +937,13 @@ class PerceptionStack:
 
     @staticmethod
     def _make_cache_key(state: UIState) -> str:
-        """用进程名 + 窗口标题生成稳定的缓存键。"""
-        return f"{state.process_name or '?'}|{state.window_title or '?'}"
+        """用进程名生成缓存键。
+
+        窗口标题会随内容变化（文件名、标签页、输入字符）频繁改变，
+        但 UI 树结构在短时间内（200ms TTL）通常不变。
+        只用 process_name 作为缓存键，大幅提升多步操作的缓存命中率。
+        """
+        return state.process_name or '?'
 
     def invalidate_cache(self) -> None:
         """清空 UIA 快照缓存（窗口切换后调用）。"""

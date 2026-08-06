@@ -285,10 +285,25 @@ class KeyboardMasterAgent:
                 try:
                     plan_obj = Plan()
                     plan_obj.__dict__.update(plan_dict)
+                    # 调试：plan_dict 里 steps 可能是 dict 列表，需要转成 PlanStep
+                    raw_steps = plan_dict.get("steps", [])
+                    if raw_steps and isinstance(raw_steps[0], dict):
+                        from .planner import PlanStep
+                        plan_obj.steps = [
+                            PlanStep(**{k: v for k, v in s.items()
+                                        if k in PlanStep.__dataclass_fields__})
+                            for s in raw_steps
+                        ]
                     saved = plan_to_workflow(plan_obj)
                     if saved:
                         result["auto_saved"] = True
                         result["auto_saved_path"] = str(saved)
+                        # 关键：新工作流落盘后必须 invalidate workflow_matcher 的候选缓存，
+                        # 否则同一进程内第二次 match() 仍会用旧的空缓存，导致复用失败。
+                        try:
+                            self.workflow_matcher.invalidate_candidates_cache()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -388,6 +403,11 @@ class KeyboardMasterAgent:
                 if saved_path:
                     result["auto_saved"] = True
                     result["auto_saved_path"] = str(saved_path)
+                    # 同上：invalidate 候选缓存，保证同进程内复用能命中
+                    try:
+                        self.workflow_matcher.invalidate_candidates_cache()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

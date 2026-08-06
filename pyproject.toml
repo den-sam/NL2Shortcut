@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nl2shortcut"
+version = "1.0.0"
+description = "NL2Shortcut Keyboard Master Agent — autonomous keyboard/mouse automation from natural language (plan, execute, learn)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "NL2Shortcut Team"}
+]
+keywords = ["keyboard", "shortcut", "automation", "nlp", "cli", "gui", "agent", "llm", "planner", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+
+dependencies = [
+    "pyautogui>=0.9.53",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+all = [
+    "pyautogui>=0.9.53",
+    "pynput>=1.7",
+    "spacy>=3.0",
+    "PyQt5>=5.15",
+]
+pynput = ["pynput>=1.7"]
+spacy = ["spacy>=3.0"]
+
+[project.scripts]
+nl2shortcut = "nl2shortcut.cli:main"
+nl2shortcut-gui = "nl2shortcut.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/nl2shortcut/nl2shortcut"
+Repository = "https://github.com/nl2shortcut/nl2shortcut"
+
+[tool.setuptools.packages.find]
+include = ["nl2shortcut*"]
